@@ -52,6 +52,9 @@ pub(crate) struct BorrowCx {
     pub(crate) drops: crate::hir::check::drops::DropFrames,
     /// What each view variable (`let r = q[i]`) borrows. Reset per function.
     pub(crate) views: HashMap<Symbol, crate::hir::check::views::View>,
+    /// The tensors each view-making `let` may be part of, keyed by the `let`'s position. The
+    /// traffic count reads it after the `let`'s scope has closed.
+    pub(crate) view_owners_by_let: HashMap<crate::syntax::Span, Vec<String>>,
 }
 
 /// What the borrow checker needs to know about a block to decide when a borrow made in or
@@ -87,6 +90,7 @@ impl Default for BorrowCx {
             current_params: HashMap::new(),
             loop_exits: Vec::new(),
             views: HashMap::new(),
+            view_owners_by_let: HashMap::new(),
             borrowers_ever: HashMap::new(),
             drops: Default::default(),
         }
