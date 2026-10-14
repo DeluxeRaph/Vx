@@ -200,7 +200,7 @@ pub fn lower_to_llvm<'c>(context: &'c Context, module: &mut Module<'c>) -> Resul
     // `arith-expand` turns conversions to and from bf16 into integer operations; see the note on
     // the copy of this pipeline in src/driver.rs.
     let mut pipeline =
-        "builtin.module(convert-vx-to-standard,vx-reorderable-reductions,arith-expand{include-bf16=true},vx-to-llvm,".to_string();
+        "builtin.module(convert-vx-to-standard,vx-check-integer-division,vx-reorderable-reductions,arith-expand{include-bf16=true},vx-to-llvm,".to_string();
     if has_enzyme {
         pipeline.push_str("enzyme,");
     }
