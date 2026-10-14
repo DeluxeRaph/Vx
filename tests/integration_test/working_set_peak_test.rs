@@ -63,7 +63,7 @@ const CASES: &[Case] = &[
     Case {
         what: "one placement",
         body: "
-  let aT = Tensor<f32, [1024, 768]>::uninit();
+  let aT = unsafe { Tensor<f32, [1024, 768]>::uninit() };
   let a = transfer(aT, Memory::W);
   let _ra = transfer(a, Memory::CPU_DRAM);
 ",
@@ -72,9 +72,9 @@ const CASES: &[Case] = &[
     Case {
         what: "two in the same block, both live until they are read",
         body: "
-  let aT = Tensor<f32, [1024, 768]>::uninit();
+  let aT = unsafe { Tensor<f32, [1024, 768]>::uninit() };
   let a = transfer(aT, Memory::W);
-  let bT = Tensor<f32, [1024, 768]>::uninit();
+  let bT = unsafe { Tensor<f32, [1024, 768]>::uninit() };
   let b = transfer(bT, Memory::W);
   let _ra = transfer(a, Memory::CPU_DRAM);
   let _rb = transfer(b, Memory::CPU_DRAM);
@@ -85,11 +85,11 @@ const CASES: &[Case] = &[
         what: "a block's tile is released before the next one is placed",
         body: "
   if true {
-    let aT = Tensor<f32, [1024, 768]>::uninit();
+    let aT = unsafe { Tensor<f32, [1024, 768]>::uninit() };
     let a = transfer(aT, Memory::W);
     let _ra = transfer(a, Memory::CPU_DRAM);
   }
-  let bT = Tensor<f32, [1024, 768]>::uninit();
+  let bT = unsafe { Tensor<f32, [1024, 768]>::uninit() };
   let b = transfer(bT, Memory::W);
   let _rb = transfer(b, Memory::CPU_DRAM);
 ",
@@ -99,12 +99,12 @@ const CASES: &[Case] = &[
         what: "sibling blocks never share the space",
         body: "
   if true {
-    let aT = Tensor<f32, [1024, 768]>::uninit();
+    let aT = unsafe { Tensor<f32, [1024, 768]>::uninit() };
     let a = transfer(aT, Memory::W);
     let _ra = transfer(a, Memory::CPU_DRAM);
   }
   if true {
-    let bT = Tensor<f32, [1024, 768]>::uninit();
+    let bT = unsafe { Tensor<f32, [1024, 768]>::uninit() };
     let b = transfer(bT, Memory::W);
     let _rb = transfer(b, Memory::CPU_DRAM);
   }
@@ -115,11 +115,11 @@ const CASES: &[Case] = &[
         what: "the two arms of one `if` are siblings too",
         body: "
   if true {
-    let aT = Tensor<f32, [1024, 768]>::uninit();
+    let aT = unsafe { Tensor<f32, [1024, 768]>::uninit() };
     let a = transfer(aT, Memory::W);
     let _ra = transfer(a, Memory::CPU_DRAM);
   } else {
-    let bT = Tensor<f32, [1024, 768]>::uninit();
+    let bT = unsafe { Tensor<f32, [1024, 768]>::uninit() };
     let b = transfer(bT, Memory::W);
     let _rb = transfer(b, Memory::CPU_DRAM);
   }
@@ -129,10 +129,10 @@ const CASES: &[Case] = &[
     Case {
         what: "an enclosing tile is still resident inside the block",
         body: "
-  let aT = Tensor<f32, [1024, 768]>::uninit();
+  let aT = unsafe { Tensor<f32, [1024, 768]>::uninit() };
   let a = transfer(aT, Memory::W);
   if true {
-    let bT = Tensor<f32, [1024, 768]>::uninit();
+    let bT = unsafe { Tensor<f32, [1024, 768]>::uninit() };
     let b = transfer(bT, Memory::W);
     let _rb = transfer(b, Memory::CPU_DRAM);
   }
@@ -144,11 +144,11 @@ const CASES: &[Case] = &[
         what: "a tile placed after a block does not meet the block's own",
         body: "
   if true {
-    let aT = Tensor<f32, [1024, 768]>::uninit();
+    let aT = unsafe { Tensor<f32, [1024, 768]>::uninit() };
     let a = transfer(aT, Memory::W);
     let _ra = transfer(a, Memory::CPU_DRAM);
   }
-  let bT = Tensor<f32, [1024, 768]>::uninit();
+  let bT = unsafe { Tensor<f32, [1024, 768]>::uninit() };
   let b = transfer(bT, Memory::W);
   let _rb = transfer(b, Memory::CPU_DRAM);
 ",
@@ -157,14 +157,14 @@ const CASES: &[Case] = &[
     Case {
         what: "outer, then a block, then outer again: only the two outer ones meet",
         body: "
-  let aT = Tensor<f32, [1024, 768]>::uninit();
+  let aT = unsafe { Tensor<f32, [1024, 768]>::uninit() };
   let a = transfer(aT, Memory::W);
   if true {
-    let bT = Tensor<f32, [1024, 768]>::uninit();
+    let bT = unsafe { Tensor<f32, [1024, 768]>::uninit() };
     let b = transfer(bT, Memory::W);
     let _rb = transfer(b, Memory::CPU_DRAM);
   }
-  let cT = Tensor<f32, [1024, 768]>::uninit();
+  let cT = unsafe { Tensor<f32, [1024, 768]>::uninit() };
   let c = transfer(cT, Memory::W);
   let _ra = transfer(a, Memory::CPU_DRAM);
   let _rc = transfer(c, Memory::CPU_DRAM);
@@ -174,13 +174,13 @@ const CASES: &[Case] = &[
     Case {
         what: "nesting accumulates down a chain",
         body: "
-  let aT = Tensor<f32, [1024, 768]>::uninit();
+  let aT = unsafe { Tensor<f32, [1024, 768]>::uninit() };
   let a = transfer(aT, Memory::W);
   if true {
-    let bT = Tensor<f32, [1024, 768]>::uninit();
+    let bT = unsafe { Tensor<f32, [1024, 768]>::uninit() };
     let b = transfer(bT, Memory::W);
     if true {
-      let cT = Tensor<f32, [1024, 768]>::uninit();
+      let cT = unsafe { Tensor<f32, [1024, 768]>::uninit() };
       let c = transfer(cT, Memory::W);
       let _rc = transfer(c, Memory::CPU_DRAM);
     }
@@ -194,15 +194,15 @@ const CASES: &[Case] = &[
         what: "a deep chain whose two inner branches are siblings",
         body: "
   if true {
-    let aT = Tensor<f32, [1024, 768]>::uninit();
+    let aT = unsafe { Tensor<f32, [1024, 768]>::uninit() };
     let a = transfer(aT, Memory::W);
     if true {
-      let bT = Tensor<f32, [1024, 768]>::uninit();
+      let bT = unsafe { Tensor<f32, [1024, 768]>::uninit() };
       let b = transfer(bT, Memory::W);
       let _rb = transfer(b, Memory::CPU_DRAM);
     }
     if true {
-      let cT = Tensor<f32, [1024, 768]>::uninit();
+      let cT = unsafe { Tensor<f32, [1024, 768]>::uninit() };
       let c = transfer(cT, Memory::W);
       let _rc = transfer(c, Memory::CPU_DRAM);
     }
@@ -215,7 +215,7 @@ const CASES: &[Case] = &[
         what: "a loop body is one residency, not one per iteration",
         body: "
   for i in 0..4 {
-    let aT = Tensor<f32, [1024, 768]>::uninit();
+    let aT = unsafe { Tensor<f32, [1024, 768]>::uninit() };
     let a = transfer(aT, Memory::W);
     let _ra = transfer(a, Memory::CPU_DRAM);
   }
@@ -225,10 +225,10 @@ const CASES: &[Case] = &[
     Case {
         what: "a tile enclosing a loop meets the loop's own",
         body: "
-  let aT = Tensor<f32, [1024, 768]>::uninit();
+  let aT = unsafe { Tensor<f32, [1024, 768]>::uninit() };
   let a = transfer(aT, Memory::W);
   for i in 0..4 {
-    let bT = Tensor<f32, [1024, 768]>::uninit();
+    let bT = unsafe { Tensor<f32, [1024, 768]>::uninit() };
     let b = transfer(bT, Memory::W);
     let _rb = transfer(b, Memory::CPU_DRAM);
   }
@@ -241,7 +241,7 @@ const CASES: &[Case] = &[
     Case {
         what: "a row of a tile is part of that tile, not a tile of its own",
         body: "
-  let aT = Tensor<f32, [1024, 768]>::uninit();
+  let aT = unsafe { Tensor<f32, [1024, 768]>::uninit() };
   let a = transfer(aT, Memory::W);
   spawn on(Topology::Dev) {
     let r = a[1];
@@ -254,7 +254,7 @@ const CASES: &[Case] = &[
     Case {
         what: "a reshape of a tile is the same tile",
         body: "
-  let aT = Tensor<f32, [1024, 768]>::uninit();
+  let aT = unsafe { Tensor<f32, [1024, 768]>::uninit() };
   let a = transfer(aT, Memory::W);
   spawn on(Topology::Dev) {
     let f = a.reshape([768, 1024]);
@@ -267,7 +267,7 @@ const CASES: &[Case] = &[
     Case {
         what: "a field that holds a tile, bound to a name, is that tile",
         body: "
-  let aT = Tensor<f32, [1024, 768]>::uninit();
+  let aT = unsafe { Tensor<f32, [1024, 768]>::uninit() };
   let h = H { t : transfer(aT, Memory::W) };
   spawn on(Topology::Dev) {
     let t = h.t;
@@ -279,7 +279,7 @@ const CASES: &[Case] = &[
     Case {
         what: "a view of a view is still part of the first tile",
         body: "
-  let aT = Tensor<f32, [1024, 768]>::uninit();
+  let aT = unsafe { Tensor<f32, [1024, 768]>::uninit() };
   let a = transfer(aT, Memory::W);
   spawn on(Topology::Dev) {
     let r = a[1];
@@ -293,7 +293,7 @@ const CASES: &[Case] = &[
     Case {
         what: "a copy of a tile is a tile of its own",
         body: "
-  let aT = Tensor<f32, [1024, 768]>::uninit();
+  let aT = unsafe { Tensor<f32, [1024, 768]>::uninit() };
   let a = transfer(aT, Memory::W);
   spawn on(Topology::Dev) {
     let c = a.clone();
@@ -403,11 +403,11 @@ fn a_peak_over_capacity_is_still_refused() {
     let over = format!(
         "{small}
 fn main() -> i32 {{
-  let aT = Tensor<f32, [1024, 768]>::uninit();
+  let aT = unsafe {{ Tensor<f32, [1024, 768]>::uninit() }};
   let a = transfer(aT, Memory::W);
-  let bT = Tensor<f32, [1024, 768]>::uninit();
+  let bT = unsafe {{ Tensor<f32, [1024, 768]>::uninit() }};
   let b = transfer(bT, Memory::W);
-  let cT = Tensor<f32, [1024, 768]>::uninit();
+  let cT = unsafe {{ Tensor<f32, [1024, 768]>::uninit() }};
   let c = transfer(cT, Memory::W);
   let _ra = transfer(a, Memory::CPU_DRAM);
   let _rb = transfer(b, Memory::CPU_DRAM);
@@ -433,15 +433,15 @@ fn main() -> i32 {{
         "{small}
 fn main() -> i32 {{
   if true {{
-    let a = Tensor<f32, [1024, 768]>::uninit();
+    let a = unsafe {{ Tensor<f32, [1024, 768]>::uninit() }};
     let _sa = transfer(a, Memory::W);
   }}
   if true {{
-    let b = Tensor<f32, [1024, 768]>::uninit();
+    let b = unsafe {{ Tensor<f32, [1024, 768]>::uninit() }};
     let _sb = transfer(b, Memory::W);
   }}
   if true {{
-    let c = Tensor<f32, [1024, 768]>::uninit();
+    let c = unsafe {{ Tensor<f32, [1024, 768]>::uninit() }};
     let _sc = transfer(c, Memory::W);
   }}
   return 0;
