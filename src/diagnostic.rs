@@ -368,6 +368,11 @@ pub enum DiagnosticCode {
     /// in one module or in two. A type has one impl of a trait, so a call could not choose
     /// between them. Remove one.
     E3049,
+    /// A pattern inside a variant's payload that is not a name or `_`, such as the `3` in
+    /// `Val(3)` or the `Inner::A(v)` in `Wrap(Inner::A(v))`. The compiler does not test such a
+    /// pattern when it chooses an arm, so the arm would be taken for any payload. Bind the
+    /// payload to a name and test it in the arm, with an `if` or another `match`.
+    E3050,
 
     // --- Borrow/Ownership Errors (E4xxx) ---
     /// Use of moved or consumed linear variable
