@@ -240,4 +240,4 @@ Raised when a `requires`, `ensures` or `invariant` clause cannot be discharged, 
 
 ______________________________________________________________________
 
-150 diagnostics.
+151 diagnostics.
