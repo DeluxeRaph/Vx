@@ -41,10 +41,10 @@ impl<'a> Parser<'a> {
             TokenType::Identifier(s) => s.to_string(),
             _ => return Err(self.error("Expected hardware identifier after Topology::")),
         };
-        match ident.as_ref() {
-            "CPU" => Ok(Topology::CPU),
-            "Current" => Ok(Topology::Current),
-            "NPU" => {
+        match TopologyKind::from_name(ident.as_ref()) {
+            TopologyKind::CPU => Ok(Topology::CPU),
+            TopologyKind::Current => Ok(Topology::Current),
+            TopologyKind::NPU => {
                 if self.match_token(&TokenType::LeftBracket) {
                     let mut expr = self.parse_expr()?;
                     super::expr::stamp_dim_literals(&mut expr);
@@ -63,7 +63,7 @@ impl<'a> Parser<'a> {
                     Err(self.error("Expected index for NPU"))
                 }
             }
-            "AccCore" => {
+            TopologyKind::AccCore => {
                 if self.match_token(&TokenType::LeftBracket) {
                     let mut expr = self.parse_expr()?;
                     super::expr::stamp_dim_literals(&mut expr);
@@ -73,9 +73,9 @@ impl<'a> Parser<'a> {
                     Err(self.error("Expected index for AccCore"))
                 }
             }
-            "AMX" => Ok(Topology::AMX),
-            "ANE" => Ok(Topology::ANE),
-            "GPU" => {
+            TopologyKind::AMX => Ok(Topology::AMX),
+            TopologyKind::ANE => Ok(Topology::ANE),
+            TopologyKind::GPU => {
                 // The index is optional, unlike NPU's: bare `Topology::GPU` predates
                 // multi-device support and means device 0, which is what every program
                 // written against it meant.
@@ -96,13 +96,14 @@ impl<'a> Parser<'a> {
                     Ok(Topology::gpu(0))
                 }
             }
-            "CpuAvx512" | "CPU_AVX512" => Ok(Topology::CpuAvx512),
-            "CpuNeon" | "CPU_Neon" => Ok(Topology::CpuNeon),
+            TopologyKind::CpuAvx512 => Ok(Topology::CpuAvx512),
+            TopologyKind::CpuNeon => Ok(Topology::CpuNeon),
             // Any other identifier is a user-defined topology, kept as a bare name here; its
             // descriptor is resolved later from the AST-carried declarations
             // (`Program.topologies`, indexed by `GlobalAstEnv`). Because the topology set is open,
             // an unknown built-in typo is indistinguishable from a custom name here.
-            other => Ok(Topology::Custom(crate::symbol::Symbol::from(other))),
+            TopologyKind::Custom(name) => Ok(Topology::Custom(name)),
+            TopologyKind::Slice => unreachable!("from_name never returns Slice"),
         }
     }
 

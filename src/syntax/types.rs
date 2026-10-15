@@ -477,6 +477,24 @@ impl std::fmt::Display for Topology {
     }
 }
 
+impl TopologyKind {
+    /// The built-in topology a name means, or `Custom` for any other name.
+    pub fn from_name(name: &str) -> TopologyKind {
+        match name {
+            "CPU" => TopologyKind::CPU,
+            "NPU" => TopologyKind::NPU,
+            "AccCore" => TopologyKind::AccCore,
+            "AMX" => TopologyKind::AMX,
+            "ANE" => TopologyKind::ANE,
+            "GPU" => TopologyKind::GPU,
+            "CpuAvx512" | "CPU_AVX512" => TopologyKind::CpuAvx512,
+            "CpuNeon" | "CPU_Neon" => TopologyKind::CpuNeon,
+            "Current" => TopologyKind::Current,
+            other => TopologyKind::Custom(crate::symbol::Symbol::from(other)),
+        }
+    }
+}
+
 impl Topology {
     /// `Topology::gpu(0)[index]`.
     ///
@@ -1960,6 +1978,28 @@ mod tests {
                     assert_ne!(a, b, "distinct topologies compared equal: {a:?} vs {b:?}");
                 }
             }
+        }
+    }
+
+    /// `Display` and `from_name` each list the built-in names, so the two lists must agree:
+    /// the printed name of a built-in reads back as the same kind. `Slice` is left out because
+    /// no program writes it, so `from_name("Slice")` is `Custom`.
+    #[test]
+    fn builtin_topology_names_read_back_as_the_same_kind() {
+        let builtins = [
+            TopologyKind::CPU,
+            TopologyKind::NPU,
+            TopologyKind::AccCore,
+            TopologyKind::AMX,
+            TopologyKind::ANE,
+            TopologyKind::GPU,
+            TopologyKind::CpuAvx512,
+            TopologyKind::CpuNeon,
+            TopologyKind::Current,
+        ];
+        for kind in builtins {
+            let name = kind.to_string();
+            assert_eq!(TopologyKind::from_name(&name), kind, "name {name:?}");
         }
     }
 }
