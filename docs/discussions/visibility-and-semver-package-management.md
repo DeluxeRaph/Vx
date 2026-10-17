@@ -1,4 +1,4 @@
-# Vx: bundled LLVM, llvm-sass, GLM on GPU, and visibility/versioning design
+# Vx: bundled LLVM, and visibility/versioning design
 
 *Chat export, October 2026*
 
