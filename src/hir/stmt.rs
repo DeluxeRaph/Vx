@@ -1163,6 +1163,7 @@ impl<'a> TypeChecker<'a> {
         // value the name no longer owns; both stay refused.
         let mut owner_before = None;
         let mut moved_fields_before = Vec::new();
+        let moved_before = self.moved_snapshot();
         if op.is_none() {
             if let Expr::Identifier(id) = lhs {
                 owner_before = self.drops_owner_state(id.name.as_ref());
@@ -1249,6 +1250,8 @@ impl<'a> TypeChecker<'a> {
                 );
             }
         }
+        // The right-hand side is read before the write, so `o = o` still reads a moved `o`.
+        self.restore_moved(moved_before);
         // `r = v` gives `r` a new value, so the borrows `r` held end, unless `v` reads `r`.
         if let (None, Expr::Identifier(id)) = (op, &*lhs) {
             let mut reads_target = false;
@@ -1308,6 +1311,9 @@ impl<'a> TypeChecker<'a> {
                 let depth = self.scope_depth_of(&id.name);
                 self.reach_borrows_of(&id.name, rhs, depth);
             } else {
+                if let Some((root, path)) = Self::extract_base_and_path(lhs) {
+                    self.unconsume_field(&root, &path);
+                }
                 self.drops_note_place_assign(lhs, &lhs_ty, lhs.span().line, &moved_fields_before);
             }
         }
@@ -1317,7 +1323,8 @@ impl<'a> TypeChecker<'a> {
                 return;
             }
         }
-        if !self.is_assignable(&lhs_ty, &rhs_ty) {
+        // A moved variable reads as `Unknown`, and E4001 already reported it.
+        if rhs_ty != Type::Unknown && !self.is_assignable(&lhs_ty, &rhs_ty) {
             // Named types and a location, like every other type error: this fires on a
             // narrowing store into half storage, where the fix is to write the `as` the
             // language requires rather than to guess what was meant.
