@@ -45,7 +45,7 @@ Where a value lives (`Memory::CPU_DRAM`, `Memory::GPU_HBM`, `Memory::NPU_HBM`) a
 
 ______________________________________________________________________
 
-## The 30-Second Demo
+## Demo Program
 
 Here is a complete matrix multiplication that prepares data on the host, stages it into an accelerator's HBM, executes on the device, and brings the result back:
 
@@ -72,14 +72,14 @@ fn main() -> i32 {
 }
 ```
 
-Run it with the built-in JIT:
+You can run it with the built-in JIT:
 
 ```bash
 $ vxc matmul.vx
 24
 ```
 
-### What happens when you make a mistake?
+### Compiler tracks provenance of each reference
 
 If you forget to transfer the input `a` and attempt to read it inside the `spawn on(Topology::NPU[0])` block, the compiler refuses the program immediately:
 
