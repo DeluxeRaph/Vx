@@ -1322,6 +1322,10 @@ impl<'a> TypeChecker<'a> {
             if !self.check_restricted_operands(op, &lhs_ty, &rhs_ty, &span) {
                 return;
             }
+            let symbol = format!("{}=", crate::hir::check::operators::binary_op_symbol(op));
+            if !self.check_no_narrow_float_operand(&symbol, &[&lhs_ty, &rhs_ty], &span) {
+                return;
+            }
         }
         // A moved variable reads as `Unknown`, and E4001 already reported it.
         if rhs_ty != Type::Unknown && !self.is_assignable(&lhs_ty, &rhs_ty) {
