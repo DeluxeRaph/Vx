@@ -17,6 +17,8 @@
 // The dispatch id bands a kind with a device index (src/arch.rs
 // `topology_dispatch_id`), so GPU[0] is 500 and GPU[1] is 501. The order of the
 // two kernels in the output is not part of the test.
+// GPU[0] and GPU[1] see only GPU memory, so each tensor is made there and the
+// result is copied back to the host.
 //
 // RUN: vxc %s --emit-mlir -X mlir=--pass-pipeline="builtin.module(convert-vx-to-standard)" 2>&1 | FileCheck %s
 // CHECK-DAG: vx.kernel @vx_npu_kernel_{{[01]}}(501)
@@ -32,21 +34,23 @@
 // PAYLOAD-DAG: topo=500
 
 fn prefill() -> f32 {
-  let mut a = unsafe { Tensor<f32, [2, 2]>::uninit() };
-  let mut b = unsafe { Tensor<f32, [2, 2]>::uninit() };
-  let mut c = unsafe { Tensor<f32, [2, 2]>::uninit() };
+  let a = unsafe { Tensor<f32, [2, 2], Memory::GPU_HBM>::uninit() };
+  let b = unsafe { Tensor<f32, [2, 2], Memory::GPU_HBM>::uninit() };
+  let mut c = unsafe { Tensor<f32, [2, 2], Memory::GPU_HBM>::uninit() };
   spawn on(Topology::GPU[0]) {
     c = a @b;
   }
-  return c[0][0];
+  let h = transfer(c, Memory::CPU_DRAM);
+  return h[0][0];
 }
 
 fn decode() -> f32 {
-  let mut p = unsafe { Tensor<f32, [2, 2]>::uninit() };
-  let mut q = unsafe { Tensor<f32, [2, 2]>::uninit() };
-  let mut r = unsafe { Tensor<f32, [2, 2]>::uninit() };
+  let p = unsafe { Tensor<f32, [2, 2], Memory::GPU_HBM>::uninit() };
+  let q = unsafe { Tensor<f32, [2, 2], Memory::GPU_HBM>::uninit() };
+  let mut r = unsafe { Tensor<f32, [2, 2], Memory::GPU_HBM>::uninit() };
   spawn on(Topology::GPU[1]) {
     r = p @q;
   }
-  return r[0][0];
+  let h = transfer(r, Memory::CPU_DRAM);
+  return h[0][0];
 }
