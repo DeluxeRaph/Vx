@@ -1210,6 +1210,7 @@ impl<'a> Parser<'a> {
             methods,
             assoc_bindings,
             copied_defaults: Vec::new(),
+            is_unsafe: false,
         })
     }
 
@@ -1413,6 +1414,13 @@ impl<'a> Parser<'a> {
                 let t = self.parse_trait_decl()?;
                 self.declare_type(&mut type_defined_at, &t.name, &start)?;
                 traits.push(t);
+            } else if self.check(&TokenType::Unsafe)
+                && matches!(self.peek_n(1).kind, TokenType::Impl)
+            {
+                self.advance();
+                let mut ib = self.parse_impl_block()?;
+                ib.is_unsafe = true;
+                impls.push(ib);
             } else if self.check(&TokenType::Impl) {
                 // `impl Transfer<Memory::A, Memory::B> for Topology::X { ... }` is a transfer
                 // lowering, not an ordinary trait impl. The trait name `Transfer` is reserved for
