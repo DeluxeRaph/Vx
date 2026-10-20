@@ -1633,6 +1633,14 @@ impl<'r> Lowerer<'r> {
                 self.lower_if_into_slot(if_expr, slot.reg)?;
                 Ok(self.emit_typed(Opcode::SlotLoad, slot.reg, Register(0), result_ty, 0))
             }
+            Expr::Match(m) => {
+                let result_ty = self.infer_expr_ty(e).ok_or(Decline::TypeNotModelled {
+                    what: "a match arm whose type cannot be inferred",
+                })?;
+                let slot = self.emit_alloca(result_ty.clone());
+                self.lower_match_with_result(m, Some(slot.reg))?;
+                Ok(self.emit_typed(Opcode::SlotLoad, slot.reg, Register(0), result_ty, 0))
+            }
             // A string literal in value position (`let s = "…"`, a string function argument): emit the
             // module-level global + `addressof`, yielding a first-class `!llvm.ptr` value — the same
             // shape the AST path's `StringLiteralExpr` produces. Backs the string-passing FFI programs
@@ -1771,6 +1779,7 @@ impl<'r> Lowerer<'r> {
                 let sig = self.registry.fn_sigs.get(&fc.name)?;
                 lowered_ty(&sig.ret_ty, self.registry)
             }
+            Expr::Match(m) => m.arms.iter().find_map(|arm| self.infer_block_ty(&arm.body)),
             Expr::If(iff) => self.infer_block_ty(comptime_survivor(iff).unwrap_or(&iff.then_block)),
             // `t.extent(k)`, as the checker rewrites it: an `i32`, as `lower_expr` emits it.
             Expr::IndexAccess(ix) if matches!(&*ix.base, Expr::MemberAccess(ma) if ma.member.as_ref() == "$extent") => {
@@ -2070,6 +2079,7 @@ impl<'r> Lowerer<'r> {
         cond: Register,
         arm: &crate::syntax::MatchArm,
         merge: u32,
+        result: Option<Register>,
     ) -> Lowered<()> {
         let body_b = self.new_block();
         let next_b = self.new_block();
@@ -2080,7 +2090,7 @@ impl<'r> Lowerer<'r> {
             pack_targets(body_b, next_b),
         );
         self.emit_effect(Opcode::BlockStart, Register(0), Register(0), body_b as u64);
-        self.lower_block(&arm.body)?;
+        self.lower_match_arm(&arm.body, result)?;
         if !self.block_terminated() {
             self.emit_effect(Opcode::Br, Register(0), Register(0), merge as u64);
         }
@@ -2088,13 +2098,28 @@ impl<'r> Lowerer<'r> {
         Ok(())
     }
 
+    fn lower_match_arm(&mut self, body: &[Statement], result: Option<Register>) -> Lowered<()> {
+        match result {
+            Some(slot) => self.lower_statements_into_slot(body, slot),
+            None => self.lower_block(body),
+        }
+    }
+
     /// Lower a *statement-form* `match <subject> { <arms> }` over a payload-free enum (#227). The
     /// subject is an `i32` discriminant; each `EnumVariant` arm becomes a `cmp subject == ordinal` +
     /// conditional branch to the arm body (taken) or the next arm's test (else) — the same eq-compare
     /// chain the AST codegen emits; a literal arm over an integer subject is the same chain. A
     /// `Wildcard` arm is the unconditional default, and so is an identifier arm, with the subject
-    /// bound under the name. Payload bindings and value-producing `match` decline.
+    /// bound under the name.
     fn lower_match(&mut self, m: &crate::syntax::MatchExpr) -> Lowered<()> {
+        self.lower_match_with_result(m, None)
+    }
+
+    fn lower_match_with_result(
+        &mut self,
+        m: &crate::syntax::MatchExpr,
+        result: Option<Register>,
+    ) -> Lowered<()> {
         // A data-carrying enum match (`match o { Option<i32>::Some(v) => .. None => .. }`, #242): the
         // subject is a `{ tag, payload }` aggregate, dispatched on its tag field. Detected from the
         // first `EnumVariant` pattern naming an enum with a payload-carrying variant.
@@ -2119,7 +2144,7 @@ impl<'r> Lowerer<'r> {
                 .map(|t| deref_to_pointee(&t).to_string())
                 .filter(|s| !s.is_empty())
                 .unwrap_or(pattern_en);
-            return self.lower_data_match(m, &enum_name);
+            return self.lower_data_match(m, &enum_name, result);
         }
         let subj = self.lower_expr(&m.expr)?;
         if !matches!(subj.ty, LoweredTy::Scalar(ElementType::I32)) {
@@ -2165,7 +2190,7 @@ impl<'r> Lowerer<'r> {
                         ElementType::Bool,
                         rel_code(&RelationalOp::Eq),
                     );
-                    self.lower_guarded_arm(cond.reg, arm, merge)?;
+                    self.lower_guarded_arm(cond.reg, arm, merge, result)?;
                 }
                 // A literal arm (`0 => ..`): the same chain, with the literal as the tag.
                 crate::syntax::Pattern::Literal(lit) => {
@@ -2182,12 +2207,10 @@ impl<'r> Lowerer<'r> {
                         ElementType::Bool,
                         rel_code(&RelationalOp::Eq),
                     );
-                    self.lower_guarded_arm(cond.reg, arm, merge)?;
+                    self.lower_guarded_arm(cond.reg, arm, merge, result)?;
                 }
                 crate::syntax::Pattern::Wildcard => {
-                    for s in &arm.body {
-                        self.lower_stmt(s)?;
-                    }
+                    self.lower_match_arm(&arm.body, result)?;
                     if !self.block_terminated() {
                         self.emit_effect(Opcode::Br, Register(0), Register(0), merge as u64);
                     }
@@ -2198,9 +2221,7 @@ impl<'r> Lowerer<'r> {
                 crate::syntax::Pattern::Identifier(name) => {
                     self.note_shadow(name);
                     self.scope.insert(name.clone(), Binding::Reg(subj.clone()));
-                    for s in &arm.body {
-                        self.lower_stmt(s)?;
-                    }
+                    self.lower_match_arm(&arm.body, result)?;
                     if !self.block_terminated() {
                         self.emit_effect(Opcode::Br, Register(0), Register(0), merge as u64);
                     }
@@ -2211,6 +2232,19 @@ impl<'r> Lowerer<'r> {
         self.close_blocks_to(depth);
         // No wildcard matched: the final else block falls through to the merge.
         if !self.block_terminated() {
+            if result.is_some() {
+                let cond = self.emit_value(
+                    Opcode::Const,
+                    Register(0),
+                    Register(0),
+                    ElementType::Bool,
+                    0,
+                );
+                let message = self.strings.len() as u64;
+                self.strings
+                    .push("no match arm produced a value".to_string());
+                self.emit_effect(Opcode::Abort, cond.reg, Register(0), message);
+            }
             self.emit_effect(Opcode::Br, Register(0), Register(0), merge as u64);
         }
         self.emit_effect(Opcode::BlockStart, Register(0), Register(0), merge as u64);
@@ -2254,7 +2288,12 @@ impl<'r> Lowerer<'r> {
     /// tag against the variant's ordinal and, in the taken block, bind each payload pattern to the
     /// loaded payload field before running the arm body — the same tag-dispatch + `extractvalue` the
     /// AST codegen emits, but through the flat aggregate machinery. (#242)
-    fn lower_data_match(&mut self, m: &crate::syntax::MatchExpr, enum_name: &str) -> Lowered<()> {
+    fn lower_data_match(
+        &mut self,
+        m: &crate::syntax::MatchExpr,
+        enum_name: &str,
+        result: Option<Register>,
+    ) -> Lowered<()> {
         let (gid, offsets, payload_types) =
             self.enum_instance_layout(enum_name)
                 .ok_or(Decline::TypeNotModelled {
@@ -2364,18 +2403,14 @@ impl<'r> Lowerer<'r> {
                             }
                         }
                     }
-                    for s in &arm.body {
-                        self.lower_stmt(s)?;
-                    }
+                    self.lower_match_arm(&arm.body, result)?;
                     if !self.block_terminated() {
                         self.emit_effect(Opcode::Br, Register(0), Register(0), merge as u64);
                     }
                     self.emit_effect(Opcode::BlockStart, Register(0), Register(0), next_b as u64);
                 }
                 crate::syntax::Pattern::Wildcard => {
-                    for s in &arm.body {
-                        self.lower_stmt(s)?;
-                    }
+                    self.lower_match_arm(&arm.body, result)?;
                     if !self.block_terminated() {
                         self.emit_effect(Opcode::Br, Register(0), Register(0), merge as u64);
                     }
@@ -2390,6 +2425,19 @@ impl<'r> Lowerer<'r> {
         }
         self.close_blocks_to(depth);
         if !self.block_terminated() {
+            if result.is_some() {
+                let cond = self.emit_value(
+                    Opcode::Const,
+                    Register(0),
+                    Register(0),
+                    ElementType::Bool,
+                    0,
+                );
+                let message = self.strings.len() as u64;
+                self.strings
+                    .push("no match arm produced a value".to_string());
+                self.emit_effect(Opcode::Abort, cond.reg, Register(0), message);
+            }
             self.emit_effect(Opcode::Br, Register(0), Register(0), merge as u64);
         }
         self.emit_effect(Opcode::BlockStart, Register(0), Register(0), merge as u64);
@@ -2459,6 +2507,9 @@ impl<'r> Lowerer<'r> {
                     if self.is_never_call(&es.expr) {
                         return self.lower_stmt(s);
                     }
+                }
+                if matches!(s, Statement::Return(_)) {
+                    return self.lower_stmt(s);
                 }
                 return Err(Decline::Unsupported {
                     what: "a branch whose last statement is not a value",
@@ -5032,19 +5083,9 @@ impl<'r> Lowerer<'r> {
                 // `Option::unwrap`): lower the match as a statement — each arm emits its own `Ret` — then
                 // give the fall-through merge block a terminator: a default (zero) return of the
                 // function's type, or for a struct or enum, an abort. (#242)
-                if let Some(Expr::Match(m)) = &r.expr {
-                    // The zero below is a fall-through default, correct when nothing reaches the
-                    // merge block carrying a value -- `Option::unwrap`'s `None` arm ends in an
-                    // `assert`, falls through, and has no value to contribute. It is wrong when an
-                    // arm ends in a bare expression: `match x { 0 => { 7 }, _ => { 9 } }` computed
-                    // both arms and then returned the default, silently. There is no value form
-                    // here (`lower_match` yields nothing), so decline to the oracle, which lowers
-                    // it with a merge-block argument and gets it right.
-                    if crate::syntax::expr::match_yields_a_value(m) {
-                        return Err(Decline::TypeNotModelled {
-                            what: "a match in value position",
-                        });
-                    }
+                if let Some(Expr::Match(m)) = r.expr.as_ref().filter(|expr| {
+                    matches!(expr, Expr::Match(m) if !crate::syntax::expr::match_yields_a_value(m))
+                }) {
                     if !self.value_drops.is_empty() {
                         return Err(Decline::Unsupported {
                             what: "a drop waiting for the value of a returned match",

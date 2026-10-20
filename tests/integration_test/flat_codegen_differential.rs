@@ -3835,3 +3835,85 @@ fn a_generic_over_two_tensor_shapes_gets_two_monomorphs() {
         "expected 1.0 + 7.0 through two distinct monomorphs, got:\n{out}"
     );
 }
+
+#[rstest::rstest]
+#[case(0, 7)]
+#[case(1, 9)]
+fn flat_matches_ast_returned_match_value(#[case] input: i32, #[case] expected: i32) {
+    assert_parity(
+        &format!("fn main() -> i32 {{ return match {input} {{ 0 => {{ 7 }}, _ => {{ 9 }}, }}; }}"),
+        expected,
+    );
+}
+
+#[test]
+fn flat_matches_ast_match_value_in_local_and_call() {
+    assert_parity(
+        "fn add_one(x: i32) -> i32 { return x + 1; }
+        fn main() -> i32 {
+            let n = match 0 { 0 => { 7 }, _ => { 9 }, };
+            return add_one(match n { 7 => { 20 }, _ => { 30 }, });
+        }",
+        21,
+    );
+}
+
+#[test]
+fn flat_matches_ast_nested_match_value() {
+    assert_parity(
+        "fn main() -> i32 {
+        return if true { match 1 { 0 => { 7 }, _ => { 9 }, } } else { 3 };
+    }",
+        9,
+    );
+}
+
+#[test]
+fn flat_matches_ast_match_value_with_side_effects() {
+    assert_parity(
+        "fn main() -> i32 {
+        let mut count = 0;
+        let value = match 0 {
+            0 => { count += 1; 7 },
+            _ => { count += 10; 9 },
+        };
+        return value + count;
+    }",
+        8,
+    );
+}
+
+#[test]
+fn flat_matches_ast_enum_match_value() {
+    assert_parity(
+        "enum Choice { First, Second }
+        fn main() -> i32 {
+            return match Choice::Second {
+                Choice::First => { 7 }, Choice::Second => { 9 },
+            };
+        }",
+        9,
+    );
+}
+
+#[test]
+fn flat_matches_ast_payload_match_value() {
+    assert_parity(
+        "enum Number { Some(i32), None }
+        fn main() -> i32 {
+            let n = Number::Some(12);
+            return match n { Number::Some(value) => { value }, Number::None => { 0 }, };
+        }",
+        12,
+    );
+}
+
+#[test]
+fn flat_matches_ast_match_value_with_early_return() {
+    assert_parity(
+        "fn main() -> i32 {
+        return match 0 { 0 => { return 7; }, _ => { 9 }, };
+    }",
+        7,
+    );
+}
