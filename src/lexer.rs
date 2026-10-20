@@ -238,6 +238,61 @@ impl<S: std::fmt::Display, C: std::fmt::Display> std::fmt::Display for TokenType
     }
 }
 
+impl<S, C> TokenTypeBase<S, C> {
+    /// True for reserved words and reserved type/topology names the lexer
+    /// classifies as their own token kinds rather than as identifiers.
+    pub fn is_keyword(&self) -> bool {
+        matches!(
+            self,
+            TokenTypeBase::Fn
+                | TokenTypeBase::Let
+                | TokenTypeBase::Mut
+                | TokenTypeBase::For
+                | TokenTypeBase::In
+                | TokenTypeBase::If
+                | TokenTypeBase::Else
+                | TokenTypeBase::Loop
+                | TokenTypeBase::While
+                | TokenTypeBase::Break
+                | TokenTypeBase::Continue
+                | TokenTypeBase::Return
+                | TokenTypeBase::Spawn
+                | TokenTypeBase::On
+                | TokenTypeBase::Where
+                | TokenTypeBase::Transfer
+                | TokenTypeBase::Unroll
+                | TokenTypeBase::Across
+                | TokenTypeBase::Match
+                | TokenTypeBase::Struct
+                | TokenTypeBase::Unsafe
+                | TokenTypeBase::Safe
+                | TokenTypeBase::Extern
+                | TokenTypeBase::Pub
+                | TokenTypeBase::Trait
+                | TokenTypeBase::TypeKw
+                | TokenTypeBase::Impl
+                | TokenTypeBase::Comptime
+                | TokenTypeBase::Import
+                | TokenTypeBase::Assert
+                | TokenTypeBase::Enum
+                | TokenTypeBase::As
+                | TokenTypeBase::Grad
+                | TokenTypeBase::Vjp
+                | TokenTypeBase::Jvp
+                | TokenTypeBase::Requires
+                | TokenTypeBase::Ensures
+                | TokenTypeBase::Invariant
+                | TokenTypeBase::MacroRules
+                | TokenTypeBase::Topology
+                | TokenTypeBase::Memory
+                | TokenTypeBase::Ref
+                | TokenTypeBase::Verified
+                | TokenTypeBase::Pinned
+                | TokenTypeBase::HardwareState
+        )
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct TokenBase<S, C> {
     pub kind: TokenTypeBase<S, C>,
@@ -1174,6 +1229,30 @@ mod tests {
         let tokens = lexer.tokenize();
         assert_eq!(tokens.len(), 1);
         assert_eq!(tokens[0].kind, TokenTypeBase::Eof);
+    }
+
+    #[test]
+    fn test_is_keyword_distinguishes_reserved_words() {
+        let across = Lexer::new("across").tokenize();
+        assert!(across[0].kind.is_keyword());
+        assert_eq!(format!("{}", across[0].kind), "across");
+        let ident = Lexer::new("across_width").tokenize();
+        assert!(!ident[0].kind.is_keyword());
+        let eq = Lexer::new("=").tokenize();
+        assert!(!eq[0].kind.is_keyword());
+    }
+
+    #[test]
+    fn test_is_keyword_covers_every_keywords_map_entry() {
+        // is_keyword mirrors KEYWORDS by hand; this catches a new map entry that
+        // never got added to the match.
+        for word in KEYWORDS.keys() {
+            let tokens = Lexer::new(word).tokenize();
+            assert!(
+                tokens[0].kind.is_keyword(),
+                "KEYWORDS entry `{word}` must report is_keyword()"
+            );
+        }
     }
 
     #[test]
