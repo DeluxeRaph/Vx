@@ -1,3 +1,11 @@
+//===- tests.rs - Vx Compiler --------------------------------------*- Rust -*-===//
+//
+// Part of the Vx Project, under the Apache License v2.0 with LLVM Exceptions.
+// See LICENSE for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+//
+//===----------------------------------------------------------------------===//
+
 use super::*;
 use crate::bytecode::{AUTODIFF_FORWARD, AUTODIFF_MODE_SHIFT, AUTODIFF_REVERSE};
 use crate::session::GlobalSession;
