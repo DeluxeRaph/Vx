@@ -1633,6 +1633,10 @@ impl<'r> Lowerer<'r> {
                 self.lower_if_into_slot(if_expr, slot.reg)?;
                 Ok(self.emit_typed(Opcode::SlotLoad, slot.reg, Register(0), result_ty, 0))
             }
+            // A `match` used as a value, such as a return value, local initializer, or call argument.
+            // Infer its result type from an arm's trailing expression and allocate a result slot.
+            // Generate branches that store the selected arm's value, then load the result.
+            // An arm with an explicit `return` leaves the function directly without storing a value.
             Expr::Match(m) => {
                 let result_ty = self.infer_expr_ty(e).ok_or(Decline::TypeNotModelled {
                     what: "a match arm whose type cannot be inferred",
