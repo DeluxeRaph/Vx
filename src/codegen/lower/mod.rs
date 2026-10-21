@@ -216,6 +216,12 @@ pub(crate) fn extract_mlir_element_type(ty_str: &str) -> Result<&'static str, St
         "i32" => Ok("i32"),
         "i64" => Ok("i64"),
         "i1" => Ok("i1"),
+        // The narrow integers. MLIR spells an unsigned value with its signed type, so a
+        // `u8`/`u16` tensor arrives here spelled `i8`/`i16`, the same way a `u32` tensor
+        // arrives as `i32`. Before these were listed, printing such a tensor stopped with
+        // `ParseType("Unsupported MLIR element type in: memref<?x?xi8>")`.
+        "i8" | "u8" => Ok("i8"),
+        "i16" | "u16" => Ok("i16"),
         _ => Err(format!("Unsupported MLIR element type in: {}", ty_str)),
     }
 }
@@ -1166,14 +1172,17 @@ pub(crate) fn lower_print_call<'c>(
     if let Expr::Borrow(borrow) = print_arg {
         print_arg = &borrow.expr;
     }
-    // The checker marks a tensor of `u32` or `u64` with a cast to its own type: MLIR integers
-    // carry no sign, and its runtime printer reads them signed.
+    // The checker marks a tensor of an unsigned type with a cast to its own type: MLIR
+    // integers carry no sign, and its runtime printer reads them signed.
     let mut unsigned_tensor = false;
     if let Expr::AsCast(cast) = print_arg {
         if let syntax::Type::Tensor(e, _, _) = &cast.target_ty {
             unsigned_tensor = matches!(
                 e,
-                syntax::types::ElementType::U32 | syntax::types::ElementType::U64
+                syntax::types::ElementType::U8
+                    | syntax::types::ElementType::U16
+                    | syntax::types::ElementType::U32
+                    | syntax::types::ElementType::U64
             );
             print_arg = &cast.expr;
         }
@@ -1206,6 +1215,10 @@ pub(crate) fn lower_print_call<'c>(
         ("i32", false) => "printMemrefI32",
         ("i64", false) => "printMemrefI64",
         ("bf16", _) => "printMemrefBF16",
+        ("i8", true) => "printMemrefU8",
+        ("i16", true) => "printMemrefU16",
+        ("i8", false) => "printMemrefI8",
+        ("i16", false) => "printMemrefI16",
         _ => return Err(LowerError::UnsupportedElementType(el_ty_str.to_string())),
     };
 
