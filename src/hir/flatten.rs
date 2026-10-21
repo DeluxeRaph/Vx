@@ -2102,6 +2102,21 @@ impl<'r> Lowerer<'r> {
         Ok(())
     }
 
+    // The checker requires a default arm for a value match. Guard against an unwritten result slot.
+    fn emit_missing_match_value_guard(&mut self) {
+        let cond = self.emit_value(
+            Opcode::Const,
+            Register(0),
+            Register(0),
+            ElementType::Bool,
+            0,
+        );
+        let message = self.strings.len() as u64;
+        self.strings
+            .push("no match arm produced a value".to_string());
+        self.emit_effect(Opcode::Abort, cond.reg, Register(0), message);
+    }
+
     fn lower_match_arm(&mut self, body: &[Statement], result: Option<Register>) -> Lowered<()> {
         match result {
             Some(slot) => self.lower_statements_into_slot(body, slot),
@@ -2237,17 +2252,7 @@ impl<'r> Lowerer<'r> {
         // No wildcard matched: the final else block falls through to the merge.
         if !self.block_terminated() {
             if result.is_some() {
-                let cond = self.emit_value(
-                    Opcode::Const,
-                    Register(0),
-                    Register(0),
-                    ElementType::Bool,
-                    0,
-                );
-                let message = self.strings.len() as u64;
-                self.strings
-                    .push("no match arm produced a value".to_string());
-                self.emit_effect(Opcode::Abort, cond.reg, Register(0), message);
+                self.emit_missing_match_value_guard();
             }
             self.emit_effect(Opcode::Br, Register(0), Register(0), merge as u64);
         }
@@ -2430,17 +2435,7 @@ impl<'r> Lowerer<'r> {
         self.close_blocks_to(depth);
         if !self.block_terminated() {
             if result.is_some() {
-                let cond = self.emit_value(
-                    Opcode::Const,
-                    Register(0),
-                    Register(0),
-                    ElementType::Bool,
-                    0,
-                );
-                let message = self.strings.len() as u64;
-                self.strings
-                    .push("no match arm produced a value".to_string());
-                self.emit_effect(Opcode::Abort, cond.reg, Register(0), message);
+                self.emit_missing_match_value_guard();
             }
             self.emit_effect(Opcode::Br, Register(0), Register(0), merge as u64);
         }
