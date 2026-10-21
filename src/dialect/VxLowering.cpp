@@ -1444,11 +1444,28 @@ static LogicalResult diagnoseUnrunnableSpawns(Operation *root) {
 /// A `linalg.fill` of a buffer, as loops over its dimensions storing the value
 /// in each element, in the `scf` and `memref` a device kernel can hold. A fill
 /// of a buffer with no dimensions is one store.
+///
+/// Each thread fills all of a shared-memory buffer. Without a barrier after
+/// the fill, a slow thread can write its zeros over a value that a fast thread
+/// already wrote. The barrier is safe only where every thread of the block
+/// reaches it: in the first block of the kernel. A fill in a branch or a loop
+/// gets a warning instead.
 static void fillToDeviceLoops(linalg::FillOp fill) {
   Value buffer = fill.getOutputs()[0];
   auto type = dyn_cast<MemRefType>(buffer.getType());
   if (!type)
     return;
+  auto space = dyn_cast_or_null<IntegerAttr>(type.getMemorySpace());
+  bool shared = space && space.getInt() == 3;
+  auto kernel = fill->getParentOfType<vx::KernelOp>();
+  bool everyThread = kernel && fill->getBlock() == &kernel.getBody().front();
+  if (shared && !everyThread)
+    fill->getParentOp()->emitWarning()
+        << "Warning: a GPU region sets shared memory to zero in a branch or a "
+           "loop, so the compiler adds no barrier after it. Another thread "
+           "can write the memory before the zero fill ends. Make the shared "
+           "tensor at the start of the region.";
+  bool sync = shared && everyThread;
   OpBuilder b(fill);
   Location loc = fill.getLoc();
   Value value = fill.getInputs()[0];
@@ -1462,6 +1479,8 @@ static void fillToDeviceLoops(linalg::FillOp fill) {
                      [&](OpBuilder &nested, Location at, ValueRange ivs) {
                        nested.create<memref::StoreOp>(at, value, buffer, ivs);
                      });
+  if (sync)
+    b.create<vx::BarrierOp>(loc);
   fill.erase();
 }
 
