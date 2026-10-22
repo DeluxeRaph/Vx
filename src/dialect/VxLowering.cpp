@@ -23,6 +23,7 @@
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/UB/IR/UBOps.h"
+#include "mlir/Dialect/Utils/IndexingUtils.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinDialect.h"
 #include "mlir/IR/BuiltinOps.h"
@@ -1469,6 +1470,21 @@ static void fillToDeviceLoops(linalg::FillOp fill) {
   OpBuilder b(fill);
   Location loc = fill.getLoc();
   Value value = fill.getInputs()[0];
+  // A register tensor takes only constant indexes, so its fill is one store
+  // for each element.
+  auto alloca = buffer.getDefiningOp<memref::AllocaOp>();
+  if (alloca && alloca->hasAttr("vx.registers") && type.hasStaticShape()) {
+    SmallVector<int64_t> strides = computeSuffixProduct(type.getShape());
+    for (int64_t flat = 0; flat < type.getNumElements(); ++flat) {
+      SmallVector<Value> at;
+      for (int64_t d = 0; d < type.getRank(); ++d)
+        at.push_back(b.create<arith::ConstantIndexOp>(
+            loc, (flat / strides[d]) % type.getDimSize(d)));
+      b.create<memref::StoreOp>(loc, value, buffer, at);
+    }
+    fill.erase();
+    return;
+  }
   SmallVector<Value> lower, upper, step;
   for (int64_t d = 0; d < type.getRank(); ++d) {
     lower.push_back(b.create<arith::ConstantIndexOp>(loc, 0));
@@ -1651,10 +1667,12 @@ static bool spawnRunsOnDevice(vx::SpawnOp spawn) {
     // A fill becomes loops before the device clone is made.
     if (isa<linalg::FillOp>(op))
       return WalkResult::skip();
-    // A drop of a tensor the region made becomes a `memref.dealloc`.
+    // A drop of a tensor the region made becomes a `memref.dealloc`. A drop of
+    // a stack slot, such as a register or shared tensor, is erased.
     if (auto drop = dyn_cast<vx::DropOp>(op)) {
       Operation *def = drop.getBuffer().getDefiningOp();
-      return def && isa<memref::AllocOp>(def) && spawn->isProperAncestor(def)
+      return def && isa<memref::AllocOp, memref::AllocaOp>(def) &&
+                     spawn->isProperAncestor(def)
                  ? WalkResult::advance()
                  : WalkResult::interrupt();
     }
@@ -2866,6 +2884,28 @@ struct ConvertVxToStandardPass
       // NVPTX renders exactly that as a `.shared` declaration -- and the
       // types line up with the alloca's uses with no casts. Dynamic ones were
       // refused above.
+      // Every stack slot of a fixed size goes to the entry block. LLVM keeps
+      // only entry-block slots in registers, and a variable declared inside an
+      // `if` or a loop of the region has its slot there.
+      {
+        Block &entry = gpuFunc.getBody().front();
+        SmallVector<memref::AllocaOp> late;
+        gpuFunc.walk([&](memref::AllocaOp a) {
+          if (a->getBlock() != &entry && a->getNumOperands() == 0)
+            late.push_back(a);
+        });
+        // In declaration order, so that the shared tensors among them are
+        // laid out in that order.
+        Operation *previous = nullptr;
+        for (memref::AllocaOp a : late) {
+          if (previous)
+            a->moveAfter(previous);
+          else
+            a->moveBefore(&entry, entry.begin());
+          previous = a;
+        }
+      }
+
       {
         SmallVector<memref::AllocaOp> smemAllocas;
         gpuFunc.walk([&](memref::AllocaOp a) {
