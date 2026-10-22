@@ -18,13 +18,12 @@ loops to work on.
 The frontend has the facts at the source level. After lowering, the same facts are spread over
 stack slots and index arithmetic, and a pass must prove them again, often more weakly.
 
-| Optimization | Where | Why | | --- | --- | --- | | Fuse adjacent lane loops and remove the
-barrier between them | frontend | Only the race proof (L4) knows that lane `i` reads only what
-lane `i` wrote. | | Keep a per-lane array in registers | frontend and LLVM | The frontend gives
-the array to one lane and unrolls the loops over it. LLVM's SROA moves it into registers. | |
-Fuse, tile and vectorize counted CPU loops | MLIR, from `affine.for` | The affine passes do this
-already, but they never see our loops. | | CSE, hoisting, scheduling, register allocation | MLIR
-and LLVM | These need nothing from the language. |
+| Optimization | Where | Why |
+| --- | --- | --- |
+| Fuse adjacent lane loops and remove the barrier between them | frontend | Only the race proof (L4) knows that lane `i` reads only what lane `i` wrote. |
+| Keep a per-lane array in registers | frontend and LLVM | The frontend gives the array to one lane and unrolls the loops over it. LLVM's SROA moves it into registers. |
+| Fuse, tile and vectorize counted CPU loops | MLIR, from `affine.for` | The affine passes do this already, but they never see our loops. |
+| CSE, hoisting, scheduling, register allocation | MLIR and LLVM | These need nothing from the language. |
 
 ## Loops today
 
