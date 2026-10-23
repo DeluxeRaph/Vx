@@ -132,6 +132,10 @@ pub enum DiagnosticCode {
     /// out of a loop that holds a `barrier()`, a write to block-shared memory with no `barrier()`
     /// after it, and the like.
     W1033,
+    /// The program writes a variable that a closure copied, and uses the closure after the
+    /// write. The closure keeps the value that it copied, so it does not see the write. A later
+    /// release makes this an error (K4).
+    W1034,
 
     // --- Parser Errors (E1xxx) ---
     /// Unexpected token
@@ -380,6 +384,32 @@ pub enum DiagnosticCode {
     /// type, so the program must write it: `let c : f32 = a * b;`. Also `+=` and the other
     /// compound operators on these values, and any operator on tensors of them.
     E3052,
+    /// An impl of `Send` or `Sync` with no `unsafe`, as in `impl Send for Handle {}`. The compiler
+    /// derives both from the fields, and a raw pointer is neither. An impl claims one for a type
+    /// that holds a raw pointer, and the compiler cannot check the claim. Write
+    /// `unsafe impl Send for Handle {}`.
+    E3053,
+    /// `unsafe impl` of a trait other than `Send` or `Sync`, or of no trait at all. Only those two
+    /// traits make a claim that the compiler cannot check. Remove `unsafe`.
+    E3054,
+    /// A task takes a value that is not `Send`, or reads a variable whose type is not `Sync`.
+    /// A task that moves a value, copies it or writes it needs `Send`. A task that reads a
+    /// variable in place shares it with the code around the task, so it needs `Sync`. The error
+    /// names the field that makes the type fail.
+    E3055,
+    /// `spawn { .. }` outside a `tasks { .. }` block. The end of the `tasks` block waits for each
+    /// task, so a task cannot outlive the variables it uses. A `spawn` in a closure, or directly in
+    /// another task, is outside the block too. Put the `spawn` in a `tasks` block of its own.
+    E3056,
+    /// A task handle used in a way other than `h.join()`, or a `spawn` that is not the value of a
+    /// `let` or a statement of its own. A task must not leave its `tasks` block, so the program
+    /// cannot return a handle, store it, or pass it to a function. Write
+    /// `let h = spawn { .. };` and later `h.join()`.
+    E3057,
+    /// A `return`, `break` or `continue` that leaves a task, or a task that joins another task.
+    /// The last expression of a task body is its result. A task cannot join another task yet.
+    /// Join both tasks in the `tasks` block.
+    E3058,
 
     // --- Borrow/Ownership Errors (E4xxx) ---
     /// Use of moved or consumed linear variable
@@ -432,6 +462,12 @@ pub enum DiagnosticCode {
     /// value has no name and drops all its fields at the end of the statement. Borrow the
     /// field (`&p.a`), clone it, or bind the value to a variable first.
     E4013,
+    /// A task that can still run when a variable that it uses ends or changes. A task in a loop
+    /// that the same pass does not join runs at the same time as the next pass, so it must not
+    /// write a variable from outside the loop, or read one that the loop writes. A task must not
+    /// use a variable that ends before its `tasks` block, such as one of the loop body. Join the
+    /// task in the same block: `let h = spawn { .. };` and then `h.join();`.
+    E4014,
 
     // --- Safety Errors (E5xxx) ---
     /// Unsafe function call outside unsafe block. `Tensor<..>::uninit()` is one: its elements
@@ -585,6 +621,21 @@ pub enum DiagnosticCode {
     /// the most an allocation can ask for. The size is known, and it is not one the generated
     /// code can allocate: it would wrap.
     E6031,
+    /// An `across` loop that the topology or its place cannot have: a topology with no `levels:`
+    /// or one whose arch cannot launch them (without `-fauto-schedule-levels`), a level the
+    /// topology does not name, a loop outside a `spawn on` region or in the wrong order, a size
+    /// that is not known when the kernel is compiled or is over the limit, or a jump out of the
+    /// loop.
+    E6032,
+    /// An index into a tensor in a `scope: thread` space that is not known when compiling. Such
+    /// a tensor stays in registers, and a register has no address. So each index must be a
+    /// constant, or made of constants and the variables of `for` loops with constant bounds, at
+    /// most 1024 passes each. The code generator unrolls those loops.
+    E6033,
+    /// An `aligned(N)` in a tensor type that the compiler cannot give: the space is not one whose
+    /// storage the compiler lays out (`scope: sm`, `cta` or `thread`), or N is less than the
+    /// `alignment:` of the space, which every tensor there has.
+    E6034,
 
     // --- Tensor/Math Errors (E7xxx) ---
     /// Matmul dimension mismatch

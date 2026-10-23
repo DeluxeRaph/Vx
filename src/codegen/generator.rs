@@ -866,6 +866,7 @@ impl<'c> MeliorGenerator<'c> {
                 line: 1,
                 column: 1,
                 length: 1,
+                expansion: 0,
             },
             index_ty,
             i32_ty,
@@ -1807,6 +1808,9 @@ impl<'c> MeliorGenerator<'c> {
             Expr::Match(e) => LowerToMelior::lower(e, self, block),
             Expr::Number(e) => LowerToMelior::lower(e, self, block),
             Expr::UnsafeBlock(e) => LowerToMelior::lower(e, self, block),
+            Expr::TaskBlock(_) => {
+                unreachable!("the checker makes each `tasks` and `spawn` a block")
+            }
             Expr::Grad(e) => LowerToMelior::lower(e, self, block),
             Expr::Vjp(e) => LowerToMelior::lower(e, self, block),
             Expr::Jvp(e) => LowerToMelior::lower(e, self, block),
@@ -2441,6 +2445,10 @@ impl<'c> MeliorGenerator<'c> {
                 .get(&s.name)
                 .filter(|decl| decl.generics.is_empty())
                 .map(|_| syntax::Type::Struct(s.name.clone(), s.type_id)),
+            // The parser reads `true` and `false` as names, and the lowering makes each an `i1`.
+            Expr::Identifier(id) if matches!(id.name.as_ref(), "true" | "false") => {
+                Some(syntax::Type::Scalar(syntax::ElementType::Bool))
+            }
             Expr::Identifier(id) => self.ast_env.get(&id.name).cloned().or_else(|| {
                 // A bare function name used as a *value* (`let f = probe`) is a function pointer;
                 // recover its signature from the function registry so a later indirect call `f(..)`

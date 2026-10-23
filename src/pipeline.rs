@@ -103,7 +103,7 @@ struct Frontend {
     subspaces: Vec<crate::codegen::flat::SubspaceInfo>,
     /// Same travel pattern as `subspaces`: the declared-arch table for `vx.spawn` stamping
     /// (Vx#352), extracted from the env because the env cannot leave the frontend.
-    topo_archs: Vec<(i64, String)>,
+    topo_archs: Vec<(i64, crate::codegen::flat::DeclaredArch)>,
     /// Same again: `arch::local_device_aliases`, for the `vx.local_devices` module attribute.
     local_devices: Vec<(i32, i32)>,
     checks: Vec<FunctionCheck>,
@@ -130,7 +130,7 @@ fn run_frontend(
     // than inferring it from a plateau.
     let modules = crate::intern_mode::timed("parse", || parse_phase(file_paths, sched))?;
     // Every file here was named by the caller, so every file's diagnostics are its concern.
-    let frontend = run_frontend_on(modules, sched, intern_mode, Reported::EveryModule)?;
+    let frontend = run_frontend_on(modules, sched, intern_mode, false, Reported::EveryModule)?;
     // Nothing declines on this path, so there is no second compile to print them again.
     report_warnings(&frontend.warnings);
     Ok(frontend)
@@ -143,6 +143,7 @@ fn run_frontend_on(
     mut modules: Vec<VxModule>,
     sched: Schedule,
     intern_mode: crate::intern_mode::InternMode,
+    auto_schedule_levels: bool,
     reported: Reported,
 ) -> Result<Frontend, PipelineError> {
     use crate::intern_mode::timed;
@@ -165,8 +166,11 @@ fn run_frontend_on(
         "Built Global Immutable Registry ({} types)",
         registry.layouts.len()
     );
-    let session =
-        std::sync::Arc::new(GlobalSession::with_registry(1, registry).in_intern_mode(intern_mode));
+    let session = std::sync::Arc::new(
+        GlobalSession::with_registry(1, registry)
+            .in_intern_mode(intern_mode)
+            .auto_schedule_levels(auto_schedule_levels),
+    );
     #[cfg(debug_assertions)]
     verify_phase_2_registry(&session.registry);
 
@@ -255,6 +259,7 @@ pub fn compile_pipeline(file_paths: &[String]) -> Result<(), PipelineError> {
     let _epoch_2_session = std::sync::Arc::new(crate::session::GlobalSession {
         epoch: 2,
         intern_mode: session.intern_mode,
+        auto_schedule_levels: session.auto_schedule_levels,
         registry: session.registry.clone(),
         slow_path_arena: std::sync::Arc::new(merged_slow),
         generics_arena: std::sync::Arc::new(merged_gen),
@@ -358,7 +363,7 @@ pub fn compile_pipeline_mlir_in(
     intern_mode: crate::intern_mode::InternMode,
 ) -> Result<Option<String>, PipelineError> {
     let modules = crate::intern_mode::timed("parse", || parse_phase(file_paths, sched))?;
-    compile_modules_mlir_in(modules, sched, intern_mode, Reported::EveryModule)
+    compile_modules_mlir_in(modules, sched, intern_mode, false, Reported::EveryModule)
 }
 
 /// [`compile_pipeline_mlir_in`] for modules a caller has already parsed and not yet expanded:
@@ -368,6 +373,7 @@ pub fn compile_modules_mlir_in(
     modules: Vec<VxModule>,
     sched: Schedule,
     intern_mode: crate::intern_mode::InternMode,
+    auto_schedule_levels: bool,
     reported: Reported,
 ) -> Result<Option<String>, PipelineError> {
     let Frontend {
@@ -380,7 +386,7 @@ pub fn compile_modules_mlir_in(
         warnings,
         type_streams,
         merged_arenas,
-    } = run_frontend_on(modules, sched, intern_mode, reported)?;
+    } = run_frontend_on(modules, sched, intern_mode, auto_schedule_levels, reported)?;
     let text = crate::intern_mode::timed("codegen", || {
         codegen_mlir_phase(
             &modules,
@@ -516,15 +522,16 @@ fn macro_expansion_phase(
             global_macros.insert(mac.name.clone(), mac.rules.clone());
         }
     }
-    // Expansion is per-module and shares nothing. `MacroExpander` holds a single `&HashMap` and no
-    // mutable state, so its methods took `&mut self` without ever being able to use it; now that
-    // they take `&self`, one expander is shared across the parallel-for and the borrow checker
-    // proves the isolation rather than a comment asserting it.
+    // Expansion is per-module and shares nothing. Each module gets its own expander, because
+    // an expander counts the expansions it makes.
     // Collected here for the same reason the macro table is: both have to be complete before
     // any module is expanded, because a trait and an impl of it need not share a module.
     let trait_defaults = crate::resolver::collect_trait_defaults(parsed_modules.iter());
-    let expander = MacroExpander::new(&global_macros, &trait_defaults);
-    let expand = |m: &mut VxModule| expander.expand_module(m).map_err(PipelineError::Parse);
+    let expand = |m: &mut VxModule| {
+        MacroExpander::new(&global_macros, &trait_defaults)
+            .expand_module(m)
+            .map_err(PipelineError::Parse)
+    };
     if sched.is_seq() {
         parsed_modules.iter_mut().try_for_each(expand)?;
     } else {
@@ -1835,6 +1842,7 @@ fn epoch_2_session(
     std::sync::Arc::new(GlobalSession {
         epoch: 2,
         intern_mode: epoch_1.intern_mode,
+        auto_schedule_levels: epoch_1.auto_schedule_levels,
         registry: std::sync::Arc::new(epoch_2_registry(&epoch_1.registry, monomorphs)),
         slow_path_arena: std::sync::Arc::new(merged_slow),
         generics_arena: std::sync::Arc::new(merged_gen),
@@ -1932,7 +1940,7 @@ fn codegen_mlir_phase(
     parsed_modules: &[VxModule],
     check_results: &mut [FunctionCheck],
     subspaces: &[crate::codegen::flat::SubspaceInfo],
-    topo_archs: &[(i64, String)],
+    topo_archs: &[(i64, crate::codegen::flat::DeclaredArch)],
     local_devices: &[(i32, i32)],
     global_session: &std::sync::Arc<GlobalSession>,
     merged_arenas: MergedArenas,
@@ -2013,6 +2021,7 @@ fn codegen_mlir_phase(
         topo_archs,
         local_devices,
         sched,
+        false,
     )
     .ok()?;
     chatter!(

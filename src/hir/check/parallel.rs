@@ -14,7 +14,7 @@
 
 use crate::hir::flatten::{is_tensor_alloc_call, tensor_alloc_placement, SPAWN_COOP};
 use crate::syntax::stmt::Statement;
-use crate::syntax::{BinaryOp, Expr, Span};
+use crate::syntax::{BinaryOp, Expr, RelationalOp, Span};
 use std::collections::{HashMap, HashSet};
 
 /// What stops the passes of a `spawn` loop from running at the same time, and where it is.
@@ -43,7 +43,15 @@ impl crate::hir::TypeChecker<'_> {
     pub(crate) fn warn_serial_spawn_loops(&mut self, body: &[Statement]) {
         let mut found = Vec::new();
         crate::syntax::visit_exprs(body, &mut |e| {
+            // A region with `across` loops maps its work to threads itself.
             if let Expr::SpawnOn(sp) = e {
+                if sp
+                    .stmts
+                    .iter()
+                    .any(crate::hir::check::across_lanes::holds_across)
+                {
+                    return;
+                }
                 if let Some(b) = serial_loop_blocker(&sp.stmts) {
                     // An expression the compiler made may have no position of its own.
                     let at = if b.span == Span::default() {
@@ -693,7 +701,7 @@ fn parallel_int_literal(e: &Expr) -> Option<i64> {
 /// receiver type. These are the stdlib's value-receiver scalar intrinsics: value in, value out,
 /// nothing written anywhere, which is exactly what the disjointness proof needs from a call.
 /// Anything not on this list rejects the region — a name here is a purity claim.
-fn parallel_pure_call(name: &str) -> bool {
+pub(crate) fn parallel_pure_call(name: &str) -> bool {
     let Some((ty, method)) = name.split_once('$') else {
         return false;
     };
@@ -739,9 +747,11 @@ fn index_key(e: &Expr, iv: &str) -> Option<String> {
                 BinaryOp::Add => "+",
                 BinaryOp::Sub => "-",
                 BinaryOp::Mul => "*",
+                BinaryOp::Div => "/",
                 _ => return None,
             };
-            let (l, r) = if op != "-" && r < l { (r, l) } else { (l, r) };
+            let ordered = matches!(op, "-" | "/");
+            let (l, r) = if !ordered && r < l { (r, l) } else { (l, r) };
             Some(format!("({l}{op}{r})"))
         }
         _ => None,
@@ -798,6 +808,9 @@ struct ParallelScan {
     /// Set by the checker, which asks why a loop stays serial: the walk goes on past a
     /// refusal, so it can see whether any write reaches memory another pass writes.
     explain: bool,
+    /// The `c` of each `if iv % c == 0` the walk is inside, with `c` a number. Only every `c`th
+    /// pass runs such a block, so row `iv / c` is that pass's own.
+    multiple_of: Vec<i64>,
     /// The first thing other than a write that stopped the split.
     blocker: Option<Blocker>,
     /// The first thing of any kind that stopped the split. The warning for a block-and-thread
@@ -829,6 +842,7 @@ impl ParallelScan {
             loop_barrier_stack: Vec::new(),
             depth: 0,
             explain: false,
+            multiple_of: Vec::new(),
             blocker: None,
             refusal: None,
             shared_write: false,
@@ -1183,6 +1197,33 @@ impl ParallelScan {
             || (is_iv(&b.rhs) && self.loop_invariant(&b.lhs))
     }
 
+    /// `iv / c` inside an `if iv % c == 0`: the passes that run the block are `c` apart, so each
+    /// reaches a different row.
+    fn group_first(&self, e: &Expr) -> bool {
+        let Expr::BinaryOp(b) = e else {
+            return false;
+        };
+        b.op == BinaryOp::Div
+            && matches!(&*b.lhs, Expr::Identifier(id) if *id.name == *self.iv)
+            && parallel_int_literal(&b.rhs).is_some_and(|c| self.multiple_of.contains(&c))
+    }
+
+    /// The `c` of `cond` when it is `iv % c == 0`, with `c` a positive number.
+    fn multiple_required(&self, cond: &Expr) -> Option<i64> {
+        let Expr::RelationalOp(r) = cond else {
+            return None;
+        };
+        let Expr::BinaryOp(b) = &*r.lhs else {
+            return None;
+        };
+        let iv_rem = b.op == BinaryOp::Rem
+            && matches!(&*b.lhs, Expr::Identifier(id) if *id.name == *self.iv);
+        (r.op == RelationalOp::Eq && iv_rem && parallel_int_literal(&r.rhs) == Some(0))
+            .then(|| parallel_int_literal(&b.rhs))
+            .flatten()
+            .filter(|c| *c > 0)
+    }
+
     /// Whether `e` has the same value on every pass: numbers, and names from outside the region.
     fn loop_invariant(&self, e: &Expr) -> bool {
         match e {
@@ -1205,6 +1246,7 @@ impl ParallelScan {
         };
         matches!(first, Expr::Identifier(fid) if *fid.name == *self.iv)
             || self.offset_first(first)
+            || self.group_first(first)
             || self.affine_first(first)
             || self.block_row_write(indices)
     }
@@ -1438,9 +1480,13 @@ impl ParallelScan {
                 let depth = self.depth;
                 let saved = self.barrier_ok;
                 self.barrier_ok = false;
-                let ok = self.expr(&i.cond)
-                    && self.stmts(&i.then_block, depth)
-                    && i.else_block.as_ref().is_none_or(|b| self.stmts(b, depth));
+                // `iv % c == 0` holds only in the `then` block.
+                let outer = self.multiple_of.len();
+                let multiple = self.multiple_required(&i.cond);
+                self.multiple_of.extend(multiple);
+                let then_ok = self.expr(&i.cond) && self.stmts(&i.then_block, depth);
+                self.multiple_of.truncate(outer);
+                let ok = then_ok && i.else_block.as_ref().is_none_or(|b| self.stmts(b, depth));
                 self.barrier_ok = saved;
                 ok
             }

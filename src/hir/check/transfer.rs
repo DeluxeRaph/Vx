@@ -194,6 +194,12 @@ impl<'a> TypeChecker<'a> {
                     Self::scan_expr_for_asserts(r, out);
                 }
             }
+            Expr::TaskBlock(b) => {
+                Self::collect_assert_contracts(&b.stmts, out);
+                if let Some(r) = &b.ret {
+                    Self::scan_expr_for_asserts(r, out);
+                }
+            }
             Expr::ComptimeBlock(b) => {
                 Self::collect_assert_contracts(&b.stmts, out);
                 if let Some(r) = &b.ret {
@@ -394,6 +400,7 @@ impl<'a> TypeChecker<'a> {
         elem: &ElementType,
         space: &MemorySpace,
         context: &str,
+        span: Option<crate::diagnostic::SourceSpan>,
     ) {
         // An un-substituted generic is not an element type yet; the instantiated body is checked.
         if matches!(elem, ElementType::Generic(_)) {
@@ -423,8 +430,141 @@ impl<'a> TypeChecker<'a> {
                 topology.display_name(),
                 listed
             ),
-            None,
+            span,
         );
+    }
+
+    /// E6026 for an element type used *inside* the active region, asked of that region's device.
+    ///
+    /// The placement checks ask this of a space, so they only see values that were placed. A
+    /// value built inside a region reaches no space; this asks the region's device instead.
+    pub(crate) fn check_element_type_in_active_region(
+        &mut self,
+        elem: &ElementType,
+        context: &str,
+        span: &crate::syntax::Span,
+    ) {
+        let space = self.active_memory.clone();
+        self.check_element_type(
+            elem,
+            &space,
+            context,
+            Some(crate::diagnostic::SourceSpan::from_ast_span(span)),
+        );
+    }
+
+    /// E6026 for every element type `ty` names, reported at `span`.
+    ///
+    /// One report per statement and element type: the same expression is checked more than
+    /// once (a probe, a second look at a loop's iterable), and one mistake in one statement
+    /// should not arrive as several errors.
+    pub(crate) fn check_type_element_types_in_active_region(
+        &mut self,
+        ty: &Type,
+        context: &str,
+        span: &crate::syntax::Span,
+        statement: &crate::syntax::Span,
+    ) {
+        for elem in self.element_types_of(ty) {
+            let key = (statement.line, statement.column, elem.clone());
+            if self.region_element_reports.insert(key) {
+                self.check_element_type_in_active_region(&elem, context, span);
+            }
+        }
+    }
+
+    /// Whether the space the code being checked runs in belongs to a device that declares
+    /// `dtypes:`. The expression check skips its work otherwise.
+    pub(crate) fn space_declares_dtypes(&self, space: &MemorySpace) -> bool {
+        self.transfer_cost_graph
+            .owning_topology(space)
+            .ok()
+            .and_then(|top| self.transfer_cost_graph.descriptor(&top.kind()))
+            .and_then(|desc| desc.dtypes.as_ref())
+            .is_some()
+    }
+
+    /// The declared fields of the struct `ty` names, from this module, a generated
+    /// instantiation, or an import -- the same three places a struct literal is resolved.
+    #[allow(clippy::type_complexity)]
+    fn struct_fields_of(
+        &self,
+        ty: &Type,
+    ) -> Option<(
+        Vec<crate::symbol::Symbol>,
+        Vec<(crate::symbol::Symbol, Type)>,
+    )> {
+        let name = match ty {
+            Type::Struct(name, _) => name,
+            Type::GenericInstance(base, _) => match &**base {
+                Type::Struct(name, _) => name,
+                _ => return None,
+            },
+            _ => return None,
+        };
+        if let Some(decl) = self.env.structs.get(name) {
+            let generics = decl.generics.iter().map(|g| g.name().into()).collect();
+            return Some((generics, decl.fields.clone()));
+        }
+        if let Some(decl) = self.mono.generated_structs.iter().find(|s| &s.name == name) {
+            let generics = decl.generics.iter().map(|g| g.name().into()).collect();
+            return Some((generics, decl.fields.clone()));
+        }
+        self.worker
+            .global
+            .registry
+            .struct_fields_of(ty)
+            .map(|fields| (fields.generics.clone(), fields.fields.clone()))
+    }
+
+    /// The data element types a type names: its own when it is a scalar, its element when it is
+    /// a tensor or vector, the types its wrappers hold, the arguments of a generic instance, and
+    /// the fields of a struct. A struct built in a region is not placed, so no placement check
+    /// sees its fields; the fields are followed here instead.
+    pub(crate) fn element_types_of(&self, ty: &Type) -> Vec<ElementType> {
+        let mut out = Vec::new();
+        let mut stack = vec![ty.clone()];
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        while let Some(t) = stack.pop() {
+            match t {
+                // `usize` is an index, not data. A region forms indices to address anything at
+                // all, and every target has them, so no `dtypes:` list answers whether a region
+                // may count or compare them. Its width is the target's, not the program's
+                // choice. A tensor or vector of `usize` is data, and stays checked below.
+                Type::Scalar(ElementType::USize) => {}
+                Type::Scalar(e) | Type::Simd(e, _) | Type::Tensor(e, _, None) => out.push(e),
+                // These name the device that holds the value, and the placement checks ask
+                // that device. Asking the region's device instead would report against a
+                // machine the value never touches.
+                Type::Tensor(_, _, Some(_)) | Type::Pinned(..) => {}
+                Type::Ref(inner, _)
+                | Type::Verified(inner)
+                | Type::Borrow { inner, .. }
+                | Type::Pointer(inner, _, _) => stack.push(*inner),
+                Type::Struct(..) | Type::GenericInstance(..) => {
+                    let args = match &t {
+                        Type::GenericInstance(_, args) => args.clone(),
+                        _ => Vec::new(),
+                    };
+                    if seen.insert(t.to_string()) {
+                        if let Some((generics, fields)) = self.struct_fields_of(&t) {
+                            let mapping: std::collections::HashMap<_, Type> =
+                                generics.into_iter().zip(args.iter().cloned()).collect();
+                            stack
+                                .extend(fields.iter().map(|(_, field)| field.substitute(&mapping)));
+                        }
+                    }
+                    if let Type::GenericInstance(base, args) = t {
+                        if !matches!(base.as_ref(), Type::Struct(..)) {
+                            stack.push(*base);
+                        }
+                        stack.extend(args);
+                    }
+                }
+                _ => {}
+            }
+        }
+        out
     }
 
     /// If a statically-shaped `Tensor<elem, dims>` placed in `space` exceeds that space's
@@ -583,7 +723,10 @@ impl<'a> TypeChecker<'a> {
         // `check_capacity` has no guard against that, unlike `record_staging_route` beside it. A
         // counter mints a fresh key per visit and turns one 3 MiB tile into two.
         let key = if span.line != 0 || span.column != 0 {
-            format!("@{}:{}:{}", span.line, span.column, span.length)
+            format!(
+                "@{}:{}:{}:{}",
+                span.line, span.column, span.length, span.expansion
+            )
         } else if let Some(name) = &self.current_assignment_target {
             // A synthesized placement carrying no position: fall back to the binding, which is
             // what this keyed on before and is stable across the second visit. Two shadowed
@@ -636,7 +779,10 @@ impl<'a> TypeChecker<'a> {
     /// exactly -- no `speculating` guard, span-keyed so a node checked twice lands on the same
     /// record, first visit's program order kept.
     pub(crate) fn record_call_edge(&mut self, callee: &str, span: &crate::syntax::Span) {
-        let key = format!("@{}:{}:{}:{}", span.line, span.column, span.length, callee);
+        let key = format!(
+            "@{}:{}:{}:{}:{}",
+            span.line, span.column, span.length, span.expansion, callee
+        );
         if self.traffic.call_sites.contains_key(&key) {
             return;
         }
@@ -648,6 +794,7 @@ impl<'a> TypeChecker<'a> {
                 scope: self.traffic.scope_chain.clone(),
                 order: self.traffic.placement_order,
                 span: *span,
+                in_closure: self.traffic.closure_depth > 0,
             },
         );
     }
@@ -748,6 +895,14 @@ impl<'a> TypeChecker<'a> {
             // earlier in program order whose block is still open -- the same prefix test the
             // peak walk uses, evaluated at the call instead of at a placement.
             for (k, c) in calls.iter().enumerate() {
+                // A call from a closure body happens wherever the closure is called. What is
+                // resident at any point is at most the function's peak.
+                if c.in_closure {
+                    if total > 0 {
+                        summary.calls[k].live.insert(space.name(), total);
+                    }
+                    continue;
+                }
                 let held: u64 = placed
                     .iter()
                     .filter(|(_, sc, ord)| {
@@ -934,6 +1089,82 @@ impl<'a> TypeChecker<'a> {
         }
     }
 
+    /// The declaration of the memory space that `p` places a tensor in, if the program has one.
+    fn space_decl(&self, p: &crate::syntax::Placement) -> Option<&crate::syntax::MemoryDecl> {
+        let space = self.placement_space(p);
+        self.env
+            .memories
+            .values()
+            .find(|m| m.name.as_ref() == space.name())
+            .copied()
+    }
+
+    /// The alignment that a tensor placed by `p` has: its `aligned(N)`, or the `alignment:` of its
+    /// space, whichever is larger. 0 when neither says.
+    pub(crate) fn alignment_of(&self, p: &crate::syntax::Placement) -> u64 {
+        let least = self
+            .space_decl(p)
+            .and_then(|m| m.alignment.as_ref())
+            .map_or(0, |a| a.0);
+        p.alignment.unwrap_or(0).max(least)
+    }
+
+    /// Each `aligned(N)` in `ty` is in a space whose storage the compiler lays out, and is at
+    /// least the `alignment:` of that space (E6034).
+    fn check_alignments_in(&mut self, ty: &Type, context: &str, span: &Span) {
+        match ty {
+            Type::Borrow { inner, .. }
+            | Type::Pointer(inner, ..)
+            | Type::Ref(inner, _)
+            | Type::Pinned(inner, _) => self.check_alignments_in(inner, context, span),
+            Type::GenericInstance(base, args) => {
+                self.check_alignments_in(base, context, span);
+                for a in args {
+                    self.check_alignments_in(a, context, span);
+                }
+            }
+            Type::Tensor(_, _, Some(p)) => {
+                let Some(n) = p.alignment else {
+                    return;
+                };
+                let space = self.placement_space(p).name();
+                let decl = self.space_decl(p);
+                let laid_out = decl.is_some_and(|m| {
+                    matches!(
+                        m.scope,
+                        Some(
+                            crate::syntax::Scope::Sm
+                                | crate::syntax::Scope::Cta
+                                | crate::syntax::Scope::Thread
+                        )
+                    )
+                });
+                let least = decl.and_then(|m| m.alignment.as_ref()).map_or(0, |a| a.0);
+                let message = if !laid_out {
+                    Some(format!(
+                        "{context}: `aligned({n})` needs a space whose storage the compiler lays \
+                         out, one declared with `scope: sm`, `cta` or `thread`, and '{space}' is not"
+                    ))
+                } else if n < least {
+                    Some(format!(
+                        "{context}: `aligned({n})` is less than the `alignment: {least} B` of \
+                         '{space}', which every tensor there has"
+                    ))
+                } else {
+                    None
+                };
+                if let Some(message) = message {
+                    self.errors.error_with_code(
+                        crate::diagnostic::DiagnosticCode::E6034,
+                        message,
+                        Some(crate::diagnostic::SourceSpan::from_ast_span(span)),
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+
     pub(crate) fn check_type_placement(&mut self, ty: &Type, context: &str, span: &Span) {
         self.check_placement_of_type(ty, context, span, true)
     }
@@ -949,9 +1180,15 @@ impl<'a> TypeChecker<'a> {
 
     fn check_placement_of_type(&mut self, ty: &Type, context: &str, span: &Span, record: bool) {
         self.report_unheld_placements(ty, context);
+        self.check_alignments_in(ty, context, span);
         for (e, d, space) in self.placed_tensors(ty) {
             self.check_capacity_of(&e, &d, &space, context, span, record);
-            self.check_element_type(&e, &space, context);
+            self.check_element_type(
+                &e,
+                &space,
+                context,
+                Some(crate::diagnostic::SourceSpan::from_ast_span(span)),
+            );
         }
     }
 
@@ -1126,7 +1363,14 @@ impl<'a> TypeChecker<'a> {
             // second visit to the same node.
             let placement_span = Self::buffer_span(&t.expr).unwrap_or(t.span);
             self.check_capacity(e, d, &target_mem, "transferred tensor", &placement_span);
-            self.check_element_type(e, &target_mem, "transferred tensor");
+            self.check_element_type(
+                e,
+                &target_mem,
+                "transferred tensor",
+                Some(crate::diagnostic::SourceSpan::from_ast_span(
+                    &placement_span,
+                )),
+            );
         }
 
         // Bandwidth-derived roofline cost (bytes / bandwidth along the hierarchy). When the
@@ -2121,7 +2365,8 @@ impl<'a> TypeChecker<'a> {
                 let prev_top = self.active_topology.clone();
                 let prev_mem = self.active_memory.clone();
                 self.active_topology = actual_top.clone();
-                self.active_memory = self.transfer_cost_graph.default_memory_for(&actual_top);
+                let region_mem = self.transfer_cost_graph.default_memory_for(&actual_top);
+                self.set_active_memory(region_mem);
 
                 *top = actual_top;
 
@@ -2172,11 +2417,32 @@ impl<'a> TypeChecker<'a> {
 
                 let mut ret_ty = Type::Struct("void".into(), None); // default void-like type
                 let has_ret = ret.is_some();
+                let ret_span = ret.as_deref().map(|r| r.span());
                 if let Some(r) = ret {
                     // The parser reads a trailing `if` as the region's value; a region used as
                     // a statement does not use it.
                     self.value_unused = unused;
                     ret_ty = self.check_expr_type_flag(r, consume);
+                }
+                // The result may be a value that was never bound to a name, and an untyped
+                // literal there was skipped by the expression check.
+                if self.active_space_declares_dtypes {
+                    if let Some(ret_span) = ret_span {
+                        let statement = self.current_statement_span;
+                        let span = if ret_span.line != 0 {
+                            ret_span
+                        } else {
+                            statement
+                        };
+                        if span.line != 0 {
+                            self.check_type_element_types_in_active_region(
+                                &ret_ty,
+                                "this region's result",
+                                &span,
+                                &statement,
+                            );
+                        }
+                    }
                 }
                 // A variable from outside the region is handed out as the same buffer.
                 let hands_out_outside =
@@ -2229,7 +2495,7 @@ impl<'a> TypeChecker<'a> {
                 self.pop_scope();
 
                 self.active_topology = prev_top;
-                self.active_memory = prev_mem;
+                self.set_active_memory(prev_mem);
 
                 // The result of a device kernel is located ON that device: return
                 // `Pinned<ret_ty, d>` so reading it on another topology re-triggers the USE

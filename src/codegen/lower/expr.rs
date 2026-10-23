@@ -2039,7 +2039,11 @@ fn lower_unsafe_block<'c>(
         }
     }
     if let Some(ret_expr) = &this.ret {
+        // The drops waiting for the value. A statement inside the value, in an `if` for
+        // example, must not run them.
+        let waiting = std::mem::take(&mut gen.queued_drops);
         let (val, ty, cur) = gen.generate_expr(ret_expr, current_block)?;
+        gen.queued_drops.extend(waiting);
         let cur = gen.run_queued_drops(cur)?;
         Ok((val, ty, cur))
     } else {
@@ -4049,6 +4053,12 @@ impl<'c> LowerToMelior<'c> for MatchExpr {
             }
             .or(gen.expected_type)
         });
+        // An arm gives a value, so the placeholder below would replace it with a wrong one.
+        if tail_expr.is_some() && !in_statement && value_ty.is_none() {
+            return Err(LowerError::ParseType(
+                "cannot find the type of the value that this `match` gives".to_string(),
+            ));
+        }
 
         let parent_region = block.parent_region().unwrap();
         let merge_block = match value_ty {

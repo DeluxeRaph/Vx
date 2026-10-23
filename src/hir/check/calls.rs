@@ -14,6 +14,7 @@
 //===----------------------------------------------------------------------===//
 
 use super::super::*;
+use crate::hir::check_state::ComptimeCheckProblemKind;
 use crate::hir::expr::{expected_numeric_elem, int_dim_expr};
 use std::collections::HashMap;
 
@@ -1222,10 +1223,12 @@ impl<'a> TypeChecker<'a> {
     /// which is what keeps a `comptime` block from leaving anything behind. A call it cannot
     /// fold -- an argument only known at run time, say -- has nowhere to go and is refused.
     /// That is stricter than a C++ `constexpr`, which would fall back to a run-time call.
+    /// `ty` is the call's type, which the folded value takes.
     pub(crate) fn fold_comptime_lambda_call(
         &mut self,
         expr: &mut Expr,
         span: &crate::syntax::Span,
+        ty: &Type,
     ) {
         let Expr::FunctionCall(call) = expr else {
             return;
@@ -1252,13 +1255,18 @@ impl<'a> TypeChecker<'a> {
             .eval_expr(expr, &env)
             .and_then(|value| Self::value_to_expr(&value, span));
         match folded {
-            Some(constant) => *expr = constant,
+            // Left bare, a number literal is an `i32`.
+            Some(mut constant) => {
+                Self::give_numbers_the_type(&mut constant, ty);
+                *expr = constant
+            }
             None => {
                 if !self.speculating {
                     self.errors.error_with_code(
                         crate::diagnostic::DiagnosticCode::E3033,
                         "this call to a `comptime` lambda cannot be evaluated: a comptime \
-                         lambda runs while compiling, so every argument has to be known then"
+                         lambda runs while compiling, so every argument has to be known then, \
+                         and every assert in it has to hold"
                             .to_string(),
                         Some(crate::diagnostic::SourceSpan::from_ast_span(span)),
                     );
@@ -1286,7 +1294,26 @@ impl<'a> TypeChecker<'a> {
         let before = self.consteval_snapshot();
         let observed = self.observe_comptime_block(&[], Some(&*expr), &before);
         let outcome = &observed.outcome;
+        // Without parameters, the function's block reported these already.
+        if takes_params {
+            let failed: Vec<_> = observed
+                .check_problems
+                .iter()
+                .filter(|problem| problem.kind == ComptimeCheckProblemKind::Fails)
+                .collect();
+            if !failed.is_empty() {
+                for problem in failed {
+                    self.report_comptime_check_failure(problem);
+                }
+                return;
+            }
+            if let Some(loop_span) = observed.loop_limit_reached_at {
+                self.report_comptime_loop_limit(&loop_span);
+                return;
+            }
+        }
         let folded = (observed.escaping_write.is_none()
+            && observed.check_problems.is_empty()
             && !observed.call_depth_exceeded
             && !outcome.requires_refusal
             && outcome.support.is_supported())
@@ -1296,8 +1323,8 @@ impl<'a> TypeChecker<'a> {
         match folded {
             Some(mut constant) => {
                 // The literal takes the function's return type. Left bare it is an `i32`.
-                if let (Expr::Number(n), Some(Type::Scalar(elem))) = (&mut constant, &ret_ty) {
-                    n.ty.get_or_insert_with(|| elem.clone());
+                if let Some(ty) = &ret_ty {
+                    Self::give_numbers_the_type(&mut constant, ty);
                 }
                 *expr = constant;
             }
@@ -1934,9 +1961,17 @@ impl<'a> TypeChecker<'a> {
                         let bound = self.substitute_bound(&bound, &mapping);
                         if !self.bound_holds(&bound, &concrete_ty) {
                             if !self.speculating {
+                                // For `Send` and `Sync`, say which field is the reason.
+                                let why =
+                                    super::thread_safety::ThreadTrait::from_name(&bound.trait_name)
+                                        .and_then(|which| {
+                                            self.why_not_thread_trait(&concrete_ty, which)
+                                        })
+                                        .map(|why| format!(": {why}"))
+                                        .unwrap_or_default();
                                 self.errors.push(format!(
-                                    "Type '{}' does not implement trait '{}' required by parameter '{}'",
-                                    concrete_ty, bound, g_name
+                                    "Type '{}' does not implement trait '{}' required by parameter '{}'{}",
+                                    concrete_ty, bound, g_name, why
                                 ));
                             }
                             success = false;
@@ -2052,13 +2087,17 @@ impl<'a> TypeChecker<'a> {
             (Expr::Borrow(b), Type::Borrow { inner, .. }) => (&mut *b.expr, &**inner),
             (arg, ty) => (arg, ty),
         };
-        // A tensor of `u32` or `u64` is marked the same way, for its runtime printer.
+        // A tensor of an unsigned element type is marked the same way, for its runtime
+        // printer.
         let unsigned = match ty {
             Type::Scalar(e) => matches!(
                 e,
                 ElementType::U8 | ElementType::U16 | ElementType::U32 | ElementType::U64
             ),
-            Type::Tensor(e, _, _) => matches!(e, ElementType::U32 | ElementType::U64),
+            Type::Tensor(e, _, _) => matches!(
+                e,
+                ElementType::U8 | ElementType::U16 | ElementType::U32 | ElementType::U64
+            ),
             _ => false,
         };
         if !unsigned {

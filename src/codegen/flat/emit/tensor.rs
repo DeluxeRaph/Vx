@@ -20,14 +20,14 @@ impl FnEmit<'_> {
     /// the `arch:` the innermost open `vx.spawn` declared (`EmitCtx::topo_archs`). No open
     /// spawn (host code), or a topology that declares none (every built-in), names no
     /// target, and the answer is today's NVPTX 3 so the emitted MLIR does not change.
-    fn shared_addrspace(&self) -> i32 {
+    pub(crate) fn shared_addrspace(&self) -> i32 {
         // Read only the frame's first field, the topology, so a new field in the frame does not
         // break this lookup.
         let arch = self
             .spawn_stack
             .last()
             .and_then(|open| self.ctx.topo_archs.get(&open.0))
-            .map(|a| a.as_str());
+            .map(|a| a.arch.as_str());
         crate::arch::address_space_for_arch(arch, crate::arch::AddressSpace::Workgroup)
     }
 
@@ -288,6 +288,23 @@ impl FnEmit<'_> {
                 .get(&(ins.operand2.0 as u64))
                 .and_then(|s| s.scope.as_deref())
                 == Some("sm");
+        let thread = ins.operand2.0 != 0
+            && self
+                .ctx
+                .subspaces
+                .get(&(ins.operand2.0 as u64))
+                .and_then(|s| s.scope.as_deref())
+                == Some("thread");
+        // A `scope: thread` tensor is a stack slot, and every index into it is a constant (E6033),
+        // so LLVM keeps its elements in registers.
+        if thread && dyn_count == 0 {
+            self.emit_slot(&format!(
+                "  {n} = memref.alloca() {{alignment = 16 : i64, vx.registers}} : {memty}\n"
+            ));
+            self.names[idx] = n;
+            self.mem_of[idx] = Some(memty);
+            return Ok(());
+        }
         if sm {
             // Shared storage is packed by the driver from static sizes; a run-time one has none.
             if dyn_count > 0 {
@@ -309,8 +326,17 @@ impl FnEmit<'_> {
             // compute-sanitizer on the block-per-row softmax (Vx#379 R3).
             // Entry block: a tensor declared inside a loop would otherwise take a
             // fresh stack slot per iteration and never give one back.
+            // At least 16, the `alignment:` of the space, and the `aligned(N)` of the type.
+            let align = self
+                .ctx
+                .subspaces
+                .get(&(ins.operand2.0 as u64))
+                .and_then(|s| s.alignment)
+                .unwrap_or(0)
+                .max(ins.operand1.0 as u64)
+                .max(16);
             self.emit_slot(&format!(
-                "  {n} = memref.alloca() {{alignment = 16 : i64}} : {smty}\n"
+                "  {n} = memref.alloca() {{alignment = {align} : i64}} : {smty}\n"
             ));
             self.names[idx] = n;
             self.mem_of[idx] = Some(smty);

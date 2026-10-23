@@ -44,22 +44,41 @@ loop and a ring of `n` slots need them. `Trace.receptive`, `Run.prefix_closed`, 
 
 ### Step 1: a tree of tasks (#1867)
 
-- A task can start tasks. Each task has a parent, and `TaskProg.Ok` allows `spawn` in a task.
-- A `spawn` in a loop takes its task id from a counter. Its flags are at `start id` and `done id`.
-- `Blocks.lean`: `Stmt.tasksBlock`, and the lowering `addJoins`. It joins each task that the block
-  did not join (T2). Today `Tasks.lean` takes the program after the compiler adds these joins.
+Step 1 is two PRs in a stack.
 
-The theorems:
+Step 1a:
 
-- `fork_hb` and `join_hb` for a task at any depth of the tree.
-- `block_hb`: each access of each task that a block started happens before the code after the
-  block.
-- `addJoins_ok`: the lowering keeps `TaskProg.Ok`.
-- `drf_sc`.
+- A task can start tasks, and `TaskProg.Ok` allows `spawn` in a task.
+- `spawnAt` and `joinAt` compute the task id. A `spawn` in a loop takes its task id from a
+  counter. Its flags are at `start id` and `done id`. `joinAt` lowers to `waitAt`.
+- A task handle cannot go into an array or a struct yet. So a join in a loop is in the same
+  pass as its `spawn`, and needs no array of handles.
+- The theorems: `fork_hb` and `join_hb` for a task at any depth of the tree, and `drf_sc`.
+
+Step 1b:
+
+- `Stmt.tasksBlock`. Each `spawn` sets a register, the mark of its task. The block clears the
+  marks at its start. At its end, it joins each task that has its mark set (T2).
+- The marks are registers, not places in memory. The model has no initial values and no total
+  `co`, so a thread can read an old write of its own to a place.
+- `block_hb` (`Blocks.lean`): each access of each task that a block started happens before the
+  code after the block. The body must not hold another `tasks` block.
+- `TaskProg.Ok` allows `tasksBlock`, and `fork_hb`, `join_hb` and `drf_sc` cover its lowering. So
+  `addJoins_ok` is not a separate theorem.
+
+The model has no captured values. When a later step adds them, it must follow T4: a task copies
+each `Copy` variable that it only reads, at its `spawn`. It borrows a variable in place only when
+it writes it, or when the variable is not `Copy`.
 
 ### Step 2: channels, by lowering (`Channel.lean`)
 
-`send` and `recv` lower to `sc` atomics. The theorems:
+`send` and `recv` lower to `sc` atomics. Each `send` gets its number from a counter, with a
+`fetchAdd`. `Counter.lean` shows that no two `fetchAdd`s get the same number. That needs the rule
+of RC11 that `co` orders the writes to each place. `Consistent` does not have that rule, so a
+theorem that needs it takes `CoOrder` as a hypothesis. Step 5 needs it too: without it, two CAS
+operations on the failure slot can both succeed.
+
+The theorems:
 
 - `send_hb_recv`: a `send` happens before the `recv` that gets its value.
 - `recv_hb_send_capacity`: for a channel with room for `n` values, the `k`-th `recv` happens
@@ -70,10 +89,22 @@ The theorems:
   sequence gives it.
 - `ChanProg.drf_sc`.
 
+`Channel.lean` has the four theorems. A drop adds 1 to a third counter of the channel, and a
+`recv` on a closed channel gets no value. Each channel carries at most `msgs` values in a run, so
+the number of places stays finite. The number of senders of a channel is fixed, so a `Sender`
+cannot be cloned yet.
+
 ### Step 3: `Mutex`, by lowering (`Mutex.lean`)
 
 - `unlock_hb_lock`: an `unlock` happens before the next `lock`.
 - `MutexProg.drf_sc`.
+
+The lock went into `Channel.lean`, so one program can use channels and locks, and
+`ChanProg.drf_sc` covers both. The lock is a ticket lock. A `lock` takes ticket `k` from the
+counter `next`, then reads the counter `serving` until it is `k`. An `unlock` adds 1 to `serving`.
+`unlock_hb_lock` shows that the `unlock` that moved `serving` past `j` happens before each read of
+`serving` that sees a larger value. `MutexExample.lean` shows a run where the lock orders a plain
+write and a plain read of two tasks.
 
 ### Step 4: library code for the channel and the lock
 
@@ -89,6 +120,19 @@ for this check. The theorems:
 - DRF-SC for a program that uses this library.
 
 Each edge also gets a herd7 litmus test, and `run_lean.py` checks that Lean and herd7 agree.
+
+Steps 2 and 3 already lower the channel and the lock to `sc` atomics in the core language. So the
+edges of steps 2 and 3 are already theorems about real code, and step 4 has no separate copy of
+the library. `ChanProg.drf_sc` is the DRF-SC theorem. Step 4 adds the two theorems about values:
+
+- `lock_excl` (`Lock.lean`). A lock is now a block, `locked m s`, so each `unlock` has its
+  `lock`. `unlock_ticket` shows that the `unlock` of the ticket `k` reads `serving` as `k`. Then
+  each event of the block of ticket `k` happens before each read of `serving` that sees more than
+  `k`. The `lock` of a later ticket ends with such a read.
+- `ring_fifo` (`Fifo.lean`). Only a `send` writes an element of the values, and only a `recv`
+  reads one. Each access of element `k` comes after the `fetchAdd` that gave its thread the number
+  `k`. So the `recv` with the number `k` gets a value that the `send` with the number `k` wrote.
+  `ring_once` shows that two reads of the same write belong to the same `recv`.
 
 DRF-SC for a client holds only with this `sc` library. A later step can make an access release or
 acquire. Each such access then needs its own edge proof and a litmus test.
@@ -111,9 +155,31 @@ The theorems:
   code of the block produced it.
 - `block_value_not_cancelled`: a task that sees the flag also sees a slot that is not 0. So its CAS
   fails, and `Cancelled` never reaches the slot.
+- `each_error_once` (F3a, #1937): the error whose CAS succeeded moves into the value of the block,
+  and the block drops each other error. The block returns or drops each error exactly once, and
+  `join()` never gives one to the code of the block. The ownership model of #1937
+  (`TaskErrorOwnership.lean`) checks the same property, with `join` giving the caller nothing.
+
+`Cancel.lean` has the first three theorems. `fail v`, `checkCancel` and `result r` are
+statements of `Channel.lean`, so a program with failures can also use channels and locks. A
+program has one failure slot and one cancel flag, after the flags of the tasks. The writes at the
+start set both to 0. A task that sees the flag fails with `cancelled`, so its CAS shows what a
+cancelled task would write. `one_failure_wins` says that at most one CAS writes the slot.
+`block_value_is_failure` takes the edge from the winning CAS to the read of the slot as a
+hypothesis: the joins of the block give it. `block_value_from_fail` shows that a value other than 0
+comes from the CAS of a failure. `ChanProg.drf_sc` now asks for code with no failures, because
+the flag uses release and acquire.
+
+`each_error_once` follows each error by the CAS of its failure. The error of at most one failure
+moves into the slot. A CAS that read the slot set does not write it, so its failure drops its
+error. Other than a CAS, only the code of the block reads the slot. A task has no `result`, so
+`join` gives no error to its caller. A value other than 0 that the block reads is the error that
+moved.
 
 Sabotage, one at a time: set the flag before the slot, and make the write of the flag relaxed.
-Each one must break `block_value_not_cancelled`. Nested `tasks` blocks come later.
+Each one must break `block_value_not_cancelled`. Let `join()` give the error to its caller: that
+must break `each_error_once`. It breaks `fclean_lower`, which `each_error_once` uses for the code
+of a task. Nested `tasks` blocks come later.
 
 ### Step 6: race freedom from footprints (C3, T5, U4, S5 without types)
 
@@ -127,6 +193,12 @@ places that it uses only through atomics. The rule:
 **Theorem.** If the footprints follow the rule, each SC execution has no race. This gives `hP`,
 so DRF-SC becomes a property of the code. This is the core of S6. It comes after steps 2 to 4,
 because tasks then share places only through the channel and the lock.
+
+#2107 has the design. The rule applies to each `tasks` block, so the proof needs only the edges of
+`fork_hb`, `join_hb` and `block_hb`. `Footprint.lean` has the first part, for `TaskProg`. The main
+code is a list of phases, and each phase is code that starts no task or a block. `raceFree` shows
+that each execution of a program that follows the rule has no data race. Tasks do not start
+tasks yet. Channels, the lock and failures come next.
 
 ## Later
 

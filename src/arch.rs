@@ -210,6 +210,54 @@ pub struct TopologyDescriptor {
     /// there. That is answerable here, before anything is emitted, because the placement is in the
     /// type and the machine is a declaration the compiler already reads.
     pub dtypes: Option<Vec<crate::syntax::ElementType>>,
+    /// The GPU generation that kernels for this topology are compiled for -- `chip: sm_90a` in
+    /// the declaration. `arch:` names the instruction set and not the part, and code for a newer
+    /// part does not load on an older one. `None` compiles for `sm_80`.
+    pub chip: Option<crate::symbol::Symbol>,
+    /// The levels of a launch that `across` loops name -- `levels: [..]` in the declaration,
+    /// outside in. `None` when the fleet file gives none: an `across` loop on it is E6032.
+    pub levels: Option<Vec<Level>>,
+}
+
+/// What a level of a launch is, given by its place in `levels:`: the first is a block, the last
+/// a lane, and a middle one a subgroup.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LevelKind {
+    /// Lanes that share a memory with `scope: cta` and can wait for each other.
+    Blocks,
+    /// Lanes that the hardware runs together: a warp.
+    Subgroups,
+    /// One thread.
+    Lanes,
+}
+
+/// One entry of `levels:`, such as `blocks(max_lanes: 1024, memory: cta)`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Level {
+    /// The word after `across`.
+    pub name: crate::symbol::Symbol,
+    pub kind: LevelKind,
+    /// For a block: the most lanes that one block can have.
+    pub max_lanes: Option<u64>,
+    /// For a subgroup: its size in lanes.
+    pub lanes: Option<u64>,
+    /// The scope whose memory has one copy for each pass of this level.
+    pub memory: Option<crate::syntax::Scope>,
+}
+
+impl TopologyDescriptor {
+    /// Whether the code generator of this topology's arch can launch the levels of `across`
+    /// loops. The built-in GPU, which has no `arch:`, is `nvptx64`.
+    pub fn launches_levels(&self, kind: &crate::syntax::TopologyKind) -> bool {
+        let arch = match (&self.arch, kind) {
+            (Some(a), _) => Some(a.as_ref()),
+            (None, crate::syntax::TopologyKind::GPU) => Some("nvptx64"),
+            (None, _) => None,
+        };
+        arch.and_then(DeviceTarget::from_arch)
+            .and_then(DeviceTarget::launch_limits)
+            .is_some()
+    }
 }
 
 /// A user-declared topology: its name plus its descriptor. Carried on the AST
@@ -386,6 +434,11 @@ fn topology_index(expr: &crate::syntax::Expr) -> i32 {
 }
 
 /// Dispatch id for a topology (`vx.spawn topology(N)`). Single source of truth.
+/// The `vx.spawn` topology of a `tasks` block, and of a task in it. No declared topology has
+/// these ids. `VxLowering` runs each task on a thread of its own (TasksBlockId, TaskId there).
+pub const TASKS_BLOCK_DISPATCH_ID: i32 = 10;
+pub const TASK_DISPATCH_ID: i32 = 11;
+
 pub fn topology_dispatch_id(top: &Topology) -> i32 {
     match top {
         Topology::CPU | Topology::Current => 0,
@@ -562,6 +615,18 @@ impl DeviceTarget {
             "amdgcn" => Some(DeviceTarget::AmdGcn),
             "spirv64" => Some(DeviceTarget::Spirv64),
             _ => None,
+        }
+    }
+
+    /// The most lanes in a block and the lanes in a subgroup, on a target whose code generator
+    /// can launch the levels of `across` loops. Only NVPTX can today.
+    pub fn launch_limits(self) -> Option<(u64, u64)> {
+        match self {
+            DeviceTarget::Nvptx64 => Some((1024, 32)),
+            DeviceTarget::X86_64
+            | DeviceTarget::Aarch64
+            | DeviceTarget::AmdGcn
+            | DeviceTarget::Spirv64 => None,
         }
     }
 
@@ -825,6 +890,8 @@ fn builtin_descriptors() -> HashMap<crate::syntax::TopologyKind, TopologyDescrip
         // The built-ins describe a class of device rather than a part, and which element types a
         // GPU has is a property of the part. Undeclared, so they constrain nothing.
         dtypes: None,
+        chip: None,
+        levels: None,
     };
     let mut m = HashMap::new();
     m.insert(K::CPU, d(CPUDRAM, &[CPUDRAM, NPUHBM]));
@@ -1026,6 +1093,60 @@ impl TransferCostGraph {
                 crate::syntax::TopologyKind::Custom(decl.name.clone()),
                 decl.descriptor.clone(),
             );
+        }
+    }
+
+    /// Let a built-in topology see the on-chip memories that a machine file declares inside its
+    /// memory, such as `Memory SMEM { within: Memory::GPU_HBM, scope: sm }` for `Topology::GPU`.
+    ///
+    /// Only a memory private to a part of the device (`scope: sm`, `cta` or `thread`) counts.
+    /// `within:` alone does not put a memory on the same device: a machine file puts GPU_HBM
+    /// within CPU_DRAM. A declared topology lists what it sees itself, so it is not changed.
+    pub fn add_on_chip_memories<'a, I>(&mut self, memories: I)
+    where
+        I: IntoIterator<Item = &'a crate::syntax::MemoryDecl>,
+    {
+        use crate::syntax::Scope;
+        let memories: Vec<&crate::syntax::MemoryDecl> = memories.into_iter().collect();
+        let parent_of = |space: &MemorySpace| {
+            memories
+                .iter()
+                .find(|m| MemorySpace::from_name(m.name.as_ref()) == *space)
+                .and_then(|m| m.parent.clone())
+        };
+        for mem in &memories {
+            if !matches!(mem.scope, Some(Scope::Sm | Scope::Cta | Scope::Thread)) {
+                continue;
+            }
+            let space = MemorySpace::from_name(mem.name.as_ref());
+            // Walk out to the nearest memory that is some topology's own memory.
+            let mut seen = vec![space.clone()];
+            let mut up = mem.parent.clone();
+            while let Some(p) = up {
+                if seen.contains(&p) {
+                    break;
+                }
+                let owners: Vec<crate::syntax::TopologyKind> = self
+                    .descriptors
+                    .iter()
+                    .filter(|(_, d)| d.default_space == p)
+                    .map(|(k, _)| k.clone())
+                    .collect();
+                if !owners.is_empty() {
+                    for kind in owners {
+                        if matches!(kind, crate::syntax::TopologyKind::Custom(_)) {
+                            continue;
+                        }
+                        let desc = self.descriptors.get_mut(&kind).expect("owner was found");
+                        if !desc.visibility.contains(&space) {
+                            desc.visibility.push(space.clone());
+                        }
+                    }
+                    break;
+                }
+                up = parent_of(&p);
+                seen.push(p);
+            }
         }
     }
 
@@ -1543,6 +1664,7 @@ mod tests {
             replicas: None,
             managed: Default::default(),
             granule: None,
+            alignment: None,
             scope,
             overcommit: false,
             crossing: crate::syntax::Crossing::default(),
@@ -1973,6 +2095,8 @@ mod tests {
             ],
             arch: None,
             dtypes: None,
+            chip: None,
+            levels: None,
         };
         let mut g = TransferCostGraph::default();
         g.apply_descriptor_edges(&desc);
@@ -2006,6 +2130,8 @@ mod tests {
             ],
             arch: None,
             dtypes: None,
+            chip: None,
+            levels: None,
         };
         let mut g = TransferCostGraph::default();
         g.apply_descriptor_edges(&desc);
@@ -2044,6 +2170,8 @@ mod tests {
             ],
             arch: None,
             dtypes: None,
+            chip: None,
+            levels: None,
         };
         let mut g = TransferCostGraph::default();
         g.apply_descriptor_edges(&desc);
@@ -2293,6 +2421,8 @@ mod tests {
                 visibility: vec![default_space],
                 transfers: Vec::new(),
                 dtypes: None,
+                chip: None,
+                levels: None,
             },
         }
     }
@@ -2374,6 +2504,8 @@ mod tests {
                 copy_engine: false,
             }],
             dtypes: None,
+            chip: None,
+            levels: None,
         };
         graph.apply_descriptor_edges(&desc);
         graph.precompute_costs();
@@ -2405,6 +2537,8 @@ mod tests {
                 copy_engine: false,
             }],
             dtypes: None,
+            chip: None,
+            levels: None,
         };
         graph.apply_descriptor_edges(&desc);
         graph.precompute_costs();
@@ -2424,6 +2558,8 @@ mod tests {
             visibility: vec![island.clone()],
             transfers: Vec::new(),
             dtypes: None,
+            chip: None,
+            levels: None,
         };
         assert!(
             descriptor_coherence(&bad, &graph).contains(&CoherenceIssue::MemoryUnreachableFromHost)
@@ -2436,6 +2572,8 @@ mod tests {
             visibility: vec![MemorySpace::CPUDRAM],
             transfers: Vec::new(),
             dtypes: None,
+            chip: None,
+            levels: None,
         };
         assert!(descriptor_coherence(&bad2, &graph).contains(&CoherenceIssue::DefaultNotVisible));
 
@@ -2446,6 +2584,8 @@ mod tests {
             visibility: vec![MemorySpace::NPUHBM],
             transfers: Vec::new(),
             dtypes: None,
+            chip: None,
+            levels: None,
         };
         assert!(descriptor_coherence(&good, &graph).is_empty());
     }
@@ -2549,6 +2689,8 @@ mod tests {
                     visibility: vec![shared.clone()],
                     transfers: Vec::new(),
                     dtypes: None,
+                    chip: None,
+                    levels: None,
                 },
             );
         }

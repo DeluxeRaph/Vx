@@ -125,6 +125,33 @@ impl<'a> TypeChecker<'a> {
         tail: Option<&Expr>,
         consume: bool,
     ) -> Type {
+        self.check_block_and_value(stmts, tail, None, consume)
+    }
+
+    /// A block with a separate value, `v` in `unsafe { ..; v }`. The value is checked inside
+    /// the block, so what it uses or moves is seen before the block's drops are placed.
+    /// `unused`: nothing reads the block's value.
+    pub(crate) fn check_expr_block_with_value(
+        &mut self,
+        stmts: &mut Vec<Statement>,
+        value: &mut Expr,
+        unused: bool,
+        consume: bool,
+    ) -> Type {
+        self.check_block_and_value(stmts, None, Some((value, unused)), consume)
+    }
+
+    /// `tail` is a separate value checked after the block closes, and `value` one checked
+    /// inside it. A block has at most one of the two.
+    fn check_block_and_value(
+        &mut self,
+        stmts: &mut Vec<Statement>,
+        tail: Option<&Expr>,
+        value: Option<(&mut Expr, bool)>,
+        consume: bool,
+    ) -> Type {
+        let has_value = value.is_some();
+        let tail = tail.or(value.as_ref().map(|(v, _)| &**v));
         Self::name_loop_literals(stmts);
         self.hoist_spawn_allocations(stmts);
         let block_unused = std::mem::replace(&mut self.value_unused, false);
@@ -136,7 +163,7 @@ impl<'a> TypeChecker<'a> {
         let last = stmts.len().saturating_sub(1);
         // An `if` or `match` arm is a block of its own: what it declares is dropped inside it,
         // and a borrow made in it ends at its last use there.
-        self.drops_enter_block(stmts);
+        self.drops_enter_block(stmts, tail);
         self.borrow.enter_block(Self::block_uses(stmts, tail));
 
         let mut declared = std::collections::HashMap::new();
@@ -160,7 +187,7 @@ impl<'a> TypeChecker<'a> {
             if let Statement::ExprStmt(ExprStmtStmt {
                 ref mut expr,
                 has_semi,
-                span: _,
+                span: stmt_span,
             }) = s
             {
                 // See the same call in `check_statement`: the values a mutable borrow is
@@ -168,8 +195,16 @@ impl<'a> TypeChecker<'a> {
                 let before = self.consteval_snapshot();
                 let scopes = self.consteval_scopes();
                 let saved_borrows = self.borrow.snapshot();
-                self.value_unused = *has_semi || i != last || block_unused;
+                // With a `tail`, the last statement is not the block's value either.
+                self.value_unused = *has_semi || i != last || tail.is_some() || block_unused;
+                // `v;` reads `v`: it does not move it.
+                let consume =
+                    consume && !(self.value_unused && matches!(expr, Expr::Identifier(_)));
+                self.allow_spawn_statement(expr);
+                let prev_statement_span =
+                    std::mem::replace(&mut self.current_statement_span, *stmt_span);
                 let ty = self.check_expr_type_flag(expr, consume);
+                self.current_statement_span = prev_statement_span;
                 if !*has_semi {
                     // A last expression that never finishes, `todo()`, gives the block the type
                     // `!` but no value: it is a statement, after which nothing runs.
@@ -203,18 +238,32 @@ impl<'a> TypeChecker<'a> {
                 _ => {}
             }
         }
+        let value_ty = value.map(|(value, unused)| {
+            self.borrow.set_stmt(stmts.len());
+            self.drops_set_stmt(stmts.len());
+            self.value_unused = unused;
+            self.check_expr_type_flag(value, consume)
+        });
         if let Some(ty) = type_at_end {
+            ret_ty = ty;
+        }
+        if let Some(ty) = value_ty {
             ret_ty = ty;
         }
         if let Some(state) = state_at_end {
             self.restore_flow_state(state);
         }
-        self.drops_exit_block(stmts, terminated_at);
+        self.drops_exit_block(stmts, terminated_at, !block_unused && !has_value);
         self.borrow.exit_block();
         ret_ty
     }
 
     pub fn check_expr_type_flag(&mut self, expr: &mut Expr, consume: bool) -> Type {
+        let span = expr.span();
+        // An untyped literal takes whatever type its context gives it, and `Tensor<..>::fill`
+        // looks at one twice. Skipping it here avoids reporting a type it was only briefly
+        // given; the expression or binding that settles its type is checked instead.
+        let untyped_literal = is_untyped_numeric_literal(expr);
         let value_unused = std::mem::replace(&mut self.value_unused, false);
         let mut is_enum_variant = false;
         if let Expr::FunctionCall(fc) = expr {
@@ -255,7 +304,7 @@ impl<'a> TypeChecker<'a> {
             }
         }
 
-        match expr {
+        let ty = match expr {
             Expr::Identifier(..) => self.check_identifier_expr(expr, consume),
             Expr::EnumVariant(..) => self.check_enumvariant_expr(expr, consume),
             Expr::Number(n) => self.check_number_literal(n),
@@ -285,7 +334,7 @@ impl<'a> TypeChecker<'a> {
                 // A comptime lambda runs while compiling, so its calls fold here. With every
                 // call folded the lambda is unused, and the `let` that bound it is dropped.
                 let span = expr.span();
-                self.fold_comptime_lambda_call(expr, &span);
+                self.fold_comptime_lambda_call(expr, &span, &ty);
                 ty
             }
             Expr::IndirectCall(..) => self.check_indirectcall_expr(expr, consume),
@@ -298,7 +347,10 @@ impl<'a> TypeChecker<'a> {
                 ty
             }
             Expr::IndexAccess(..) => self.check_indexaccess_expr(expr, consume),
-            Expr::MethodCall(..) => self.check_methodcall_expr(expr, consume),
+            Expr::MethodCall(..) => match self.check_task_join(expr, consume && !value_unused) {
+                Some(ty) => ty,
+                None => self.check_methodcall_expr(expr, consume),
+            },
             Expr::BinaryOp(..) => self.check_binaryop_expr(expr, consume),
             Expr::RelationalOp(..) => self.check_relationalop_expr(expr),
             Expr::LogicalOp(..) => self.check_logicalop_expr(expr),
@@ -330,6 +382,10 @@ impl<'a> TypeChecker<'a> {
             Expr::UnsafeBlock(..) => {
                 self.value_unused = value_unused;
                 self.check_unsafeblock_expr(expr, consume)
+            }
+            Expr::TaskBlock(..) => {
+                self.value_unused = value_unused;
+                self.check_task_block_expr(expr, consume)
             }
             Expr::StructInit(..) => self.check_structinit_expr(expr, consume),
             Expr::Grad(..) => self.check_grad_expr(expr),
@@ -376,7 +432,25 @@ impl<'a> TypeChecker<'a> {
                 crate::syntax::Type::Scalar(crate::syntax::types::ElementType::I32)
                 // Fallback type
             }
+        };
+
+        // A value built inside a device region has no placement, so no placement check sees
+        // it. The region's device has to be able to represent it. Silent outside a region,
+        // whose host space declares no `dtypes:`.
+        if !untyped_literal && !self.speculating && self.active_space_declares_dtypes {
+            // Most expression nodes carry no span of their own, so point at the statement
+            // that contains them instead.
+            let statement = self.current_statement_span;
+            let (span, context) = if span.line != 0 {
+                (span, "this expression")
+            } else {
+                (statement, "a value in this statement")
+            };
+            if span.line != 0 {
+                self.check_type_element_types_in_active_region(&ty, context, &span, &statement);
+            }
         }
+        ty
     }
 
     /// Lowers an AST `Type` to a globally resolved `TypeId` structure.
@@ -446,6 +520,12 @@ impl<'a> TypeChecker<'a> {
         if let (Some((t_inner, t_top)), Some((s_inner, s_top))) =
             (Self::located_parts(target), Self::located_parts(source))
         {
+            // A tensor fits where a smaller alignment is asked, not a larger one.
+            if let (Type::Tensor(_, _, Some(t)), Type::Tensor(_, _, Some(s))) = (target, source) {
+                if self.alignment_of(s) < self.alignment_of(t) {
+                    return false;
+                }
+            }
             return t_top == s_top && self.is_assignable(&t_inner, &s_inner);
         }
 

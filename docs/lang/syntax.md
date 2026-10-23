@@ -195,7 +195,9 @@ fn dispatch<D: Topology>(x: Pinned<i32, Topology::D>) -> i32 {
     generics at once, as in `Pair<Pair<i32>>`.
   - Both operands have the same type, as for every other binary operator, so the shift
     count is not a separate width. Shifting by at least the operand's width is undefined
-    and nothing checks it, as with division by zero.
+    and nothing checks it.
+  - An integer `/` or `%` stops the program when it divides by zero, or when it divides the
+    minimum value of its type by -1.
 - Relational Operators: `==`, `!=`, `<`, `>`, `<=`, `>=` (Returns a Boolean evaluation)
 - Logical Operators: `&&`, `||`, `!` (Requires Boolean operands)
 - Range: `..` (e.g. `0..4`, and inside a topology index such as `NPU[0..4]`)
@@ -418,9 +420,8 @@ The initializer list is the one construction still written the older way, becaus
 *contents* rather than a shape and the type-applying constructors take neither. See
 [types.md §6](./types.md#6-topology-aware-allocation) for `::new()` and `::uninit()`.
 
-A **slice** (a row of a tensor, see the slice operators in
-[`slice_operators.md`](../discussions/implementation_plans/slice_operators.md)) can be initialized
-in place from a flat array literal:
+A **slice** (a row of a tensor) can be initialized in place from a flat array
+literal:
 
 ```rust
 let mut o = Tensor<f32>([[0.0, 0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 0.0]]);

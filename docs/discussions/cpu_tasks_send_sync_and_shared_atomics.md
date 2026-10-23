@@ -26,7 +26,9 @@ in a function or closure that the block calls. Outside a `tasks` block it is a c
 **T2. The result.** `spawn { e }` has the type `Task<T>`, where `T` is the type of `e`.
 `h.join()` takes `h` by value, waits for the task, and returns its `T`. The end of the `tasks` block
 joins each task that the program did not join, and drops its result. A task that can fail does
-not lose its error this way (F3 in `waiting_tasks_channels_and_task_errors.md`).
+not lose its error this way (F3 in `waiting_tasks_channels_and_task_errors.md`). For a task whose
+`e` has the type `Result<T, E>`, `join()` returns the `T`, and a failure leaves the block instead
+(F1 and F3a there): the block owns each error.
 
 **T3. The join comes from the program structure.** When a `tasks` block ends, every task that it
 started is finished. A `Task<T>` cannot leave its `tasks` block: the program may not return it,
@@ -46,9 +48,15 @@ fork to the join (C3). So:
 - a task in a loop is a new part on each pass. A `&mut` that it takes conflicts with the task of
   the next pass, so it is an error. A value that each pass moves into its own task is valid.
 - a task may move a value of the function into itself. The function cannot use it again.
+- a task copies a `Copy` value that it only reads, at the fork (T4). Then the copy needs `Send`,
+  and the variable may end before the task does. So this is valid:
+  `for i in 0..n { spawn { work(i) }; }`. A copied reference keeps what it points at borrowed
+  until the join. The code around the task must not write the variable until the join (K4 in
+  `waiting_tasks_channels_and_task_errors.md`).
 
 **T6. A panic in a task stops the program**, as `panic` does today. Vx does not unwind, so
-`join()` never reports a panic. A task that can fail returns a `Result` (F1).
+`join()` never reports a panic. A task that can fail returns a `Result`, and its failure is the
+failure of the block (F1).
 
 **T7. What runs a task.** The language promises that a task finishes, not that it runs at the same
 time as another task. One valid run is: each task runs to its end at its `spawn` (C1, serial
@@ -183,5 +191,30 @@ compiler adds those joins.
 1. `tasks` and `spawn`, parsed and borrow checked (T1 to T5). The first lowering runs each task at
    its `spawn`, which T7 allows. So programs and tests can come before threads.
 1. OS threads (#1863), and the Lean fork and join (#1867).
+
+The first version of step 3 has these limits. Each one gives a compile error, and none is
+unsound:
+
+- The only use of a task handle is `h.join()`. A handle cannot go into an array or a struct.
+- A task cannot join another task.
+- A join ends the borrows of its task only when it always runs after the `spawn`, in the same
+  block. Any other join leaves them until the end of the `tasks` block.
+- `spawn on(T)` in a `tasks` block (T8) keeps its old meaning.
+
+A closure does not follow K4 yet (#1941).
+
+Step 4 runs each task on an OS thread of its own (#1863). The flat code generator does it. The
+AST code generator still runs each task at its `spawn`, which T7 allows. A program that the flat
+code generator cannot take falls back to the AST code generator, so its tasks run one after
+another.
+
+- The `spawn` copies into the task's environment each scalar and struct local that the task
+  only loads (T4). The task gets a pointer to the other locals, which the borrow rules keep valid
+  until the join.
+- A move at the top of a task body happens at the `spawn`, so the owner's drop needs no flag.
+- Each use of the result of a task waits for the task. `join()` and the end of the block are such
+  uses.
+- While a task runs, each thread writes what it prints one line at a time, so the lines of two
+  tasks do not mix.
 
 Tasks that wait, channels and errors from tasks are in `waiting_tasks_channels_and_task_errors.md`.

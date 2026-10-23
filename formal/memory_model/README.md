@@ -73,7 +73,9 @@ sequentially consistent atomics and no fences. A place can have both atomic and 
 `atomic_read_of_a_plain_write.litmus` shows such a race.
 
 The core language in `Thread.lean` and `Language.lean` has registers, loads, stores, `fetchAdd`,
-`cas`, fences, `if` and loops. Each access names its memory order. A read-modify-write is a read
+`cas`, fences, `if` and loops. Each access names its memory order. `loadAt` and `storeAt` access
+an element of an array at an index that the code computes. An index outside the array stops the
+thread, as a failed bounds check does. A read-modify-write is a read
 and then a write, so a thread can stop between them. All threads start together. `Language.lean`
 shows that the executions of these programs have the three properties. `Prog.drf_sc` then needs
 one rule on the code, which a type checker can check: `Prog.SeqCstOnly` (only `sc` atomics, no
@@ -81,14 +83,71 @@ fences).
 
 `Tasks.lean` adds `spawn` and `join`, with the meaning that #1860 chose for `tasks { .. }`. A
 `spawn` is an `sc` write of a flag, and the task waits for that flag before it starts. A task
-sets another flag at its end, and `join` waits for it. `fork_hb` and `join_hb` show that in each
-run, the code before a `spawn` comes before the task, and the task comes before the code after
-its `join`. `LanguageExample.lean` builds an execution of message passing with release and
-acquire, and one where the main code starts two tasks and joins them, with plain data.
+sets another flag at its end, and `join` waits for it. A task can start tasks, and `spawnAt`
+computes the task id, as a `spawn` in a loop does. `fork_hb` and `join_hb` show that in each run,
+the code before a `spawn` comes before the task, and the task comes before the code after its
+`join`, at any depth of the tree of tasks. `LanguageExample.lean` builds an execution of message
+passing with release and acquire, and one that passes a message through an array. With plain
+data, it also builds one where the main code starts two tasks and joins them, one where a task
+starts a task, and one with a `spawn` and a `join` in each pass of a loop.
+
+`Blocks.lean` adds `tasks { .. }`. Each `spawn` sets a register, the mark of its task. At its end,
+the block joins each task that has its mark set, so it waits only for the tasks that it started.
+`block_hb` shows that each task that a block started happens before the code after the block.
+`BlocksExample.lean` applies `block_hb` to a run, and shows a block that starts no task and does
+not wait.
+
+`Footprint.lean` proves race freedom from a rule on the code. The main code is a list of phases:
+code that starts no task, or a `tasks` block. In a block, two tasks make no accesses that can
+race, and the code of the block makes no access that can race with a task of the block. Code
+outside the blocks can access any place. `raceFree` shows that each execution of such a program
+has no data race, so `drf_sc_of_footprints` needs no hypothesis on its executions.
+`FootprintExample.lean` shows that the tasks of `forkJoin` in a block follow the rule.
 
 ```bash
 lake -d formal/memory_model/lean build    # Lean 4.35, no other libraries
 ```
+
+`Counter.lean` shows that two `fetchAdd`s of a counter never read the same value
+(`Counter.tickets`). A channel gives each `send` its number this way. The proof needs the rule of
+RC11 that `co` orders the writes to each place (`CoOrder`). `Consistent` does not have that rule,
+so the theorems that need it take `CoOrder` as a hypothesis. `CounterExample.lean` shows an
+execution that `Consistent` allows without it, where both `fetchAdd`s read 0.
+
+`Channel.lean` adds `send` and `recv`, and lowers them to `sc` atomics on places that the code of
+the program cannot use. Each `send` and each `recv` takes its number from a counter of the
+channel. A `send` waits for the flag `taken k`, writes its value, and sets `full k`. A `recv` waits
+for `full k`, reads the value, and sets `taken (k + n)`, for a channel with room for `n` values.
+By `Counter.tickets`, each flag has one writer. So `send_hb_recv` shows that a `send` happens
+before the `recv` that gets its value. `recv_hb_send_capacity` shows that the `recv` with the
+number `k` happens before the `send` with the number `k + n` ends. A drop of a sender adds 1 to a
+third counter. A `recv` waits in a loop that reads this counter, then `full k`. It gets no value
+when all senders dropped and `full k` is not set. `drop_hb_closed` shows that each drop happens
+before each read that sees all the drops. `Counter.hb_of_lt` gives this edge: a `fetchAdd` happens
+before each `sc` read of a larger value. `ChanProg.drf_sc` follows from `TaskProg.drf_sc`.
+A lock is a ticket lock with the counters `next` and `serving`. The code holds it in a block,
+`locked m s`. The block takes ticket `k` from `next`, reads `serving` until it is `k`, runs `s`,
+and adds 1 to `serving`. `unlock_hb_lock` gives the edge from each `unlock` to each later `lock`,
+also by `Counter.hb_of_lt`. `Lock.lean` shows that the `unlock` of the ticket `k` reads `serving`
+as `k` (`unlock_ticket`). So `lock_excl` shows that two tasks never hold a lock at the same time:
+each event of the block of ticket `k` happens before each event of the block of a later ticket.
+`Fifo.lean` shows that each `recv` gets the value of one `send`, in order (`ring_fifo`). The
+`recv` with the number `k` reads element `k` of the values, and only the `send` with the number
+`k` writes it. By `ring_once`, two reads of the same write belong to the same `recv`, so no value
+arrives twice.
+`Cancel.lean` gives a program a failure slot and a cancel flag. `fail v` writes the error `v` to
+the slot with a CAS from 0. If the CAS wrote the slot, it sets the flag with a release write.
+`checkCancel` reads the flag with acquire, and fails with `cancelled` if the flag is set.
+`one_failure_wins` shows that at most one CAS writes the slot. `block_value_is_failure` shows
+that a read of the slot that the winning CAS happens before gets its value.
+`block_value_not_cancelled` shows that `cancelled` never reaches the slot. `each_error_once`
+shows that the error of at most one failure moves into the slot. The CAS of each other failure
+does not write, so that failure drops its error. A task with no `result` never reads the slot, so
+`join` gives no error to its caller.
+`ChannelExample.lean` builds a run where the main code sends 7 and drops its sender, and a task
+makes two `recv`s. The first gets 7, and the second finds the channel closed. `check` finds that
+the model allows this run with no data race. `MutexExample.lean` builds a run where a lock orders
+a plain write of the main code before a plain read of a task.
 
 The definitions in `lean/VxMemoryModel/Rc11.lean` follow `memalloy/vx_cpu.cat` line by line.
 `run_lean.py` checks that Lean and `vx.cat` agree on the 13 tests without scopes and barriers:
@@ -145,8 +204,34 @@ A fork or a join is a release write and an acquire read of a flag, as in the exa
 - The rule for sequentially consistent atomics ignores scopes.
 - herd7 checks each test completely, but only the tests. memalloy checks every execution up to 5
   or 6 events.
-- The core language has no functions and no references. A task can not start other tasks, and
-  a `spawn` in a loop does not start a new task on each pass.
+- The core language has no functions and no references.
+- `block_hb` needs a block whose body holds no other `tasks` block. A task can hold its own
+  blocks.
 - The Lean model has no scopes and no barriers.
 - The model covers only C0 to C7. The rules for sequential code, E1 to E7 and A1 to A6, are not in
   it.
+- `Consistent` does not ask that `co` orders the writes to each place. A theorem that needs it
+  takes `CoOrder` as a hypothesis.
+- A channel carries at most `msgs` values in a run. Its number of senders is fixed, so a sender
+  cannot be cloned yet.
+- `drop_hb_closed` speaks of the reads of the counter of drops. That a `recv` returns no value
+  only after such a read, and that it then loses no value, follows from its code. No theorem shows
+  it yet.
+- The code holds a lock for one block. So a guard of a `Mutex` that moves out of its block has no
+  model yet. A block of a lock cannot hold another block of the same lock.
+- `lock_excl` speaks of the reads of `serving` that let a later ticket in. That the `lock` of a
+  ticket ends with such a read follows from `Hold` in `Lock.lean`. No theorem states it on its
+  own.
+- A program has one failure slot, so only one `tasks` block can fail. A task that sees the cancel
+  flag does not stop: the model shows only that its CAS fails. `ChanProg.drf_sc` needs code with
+  no failures, because the flag uses release and acquire. `run_lean.py` has no read-modify-writes,
+  so no herd7 test has the CAS of a failure. `message_passing_release_acquire` checks the edge of
+  the flag.
+- `each_error_once` follows an error by the CAS of its failure, not by a value with an owner. A
+  CAS that loses still reads the error that won, but only to see that the slot is set.
+- The footprint rule covers only `TaskProg`: no channels, no locks and no failures. A task cannot
+  start a task, and a block cannot be in a loop. The rule is stricter than needed: two blocks
+  that run one after the other can share places, but two tasks of one block cannot.
+- `ring_fifo` speaks of each read of the values. A `recv` reads its element once, and only after
+  it reads `full k` as 1. A `send` writes its element once. This follows from their code, but no
+  theorem states it yet.
