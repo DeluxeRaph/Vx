@@ -45,6 +45,7 @@
 #include "mlir/Transforms/Mem2Reg.h"
 #include "mlir/Transforms/Passes.h"
 #include "mlir/Transforms/RegionUtils.h"
+#include "vx_hardware_runtime.h"
 #include "llvm/ADT/SetVector.h"
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/ADT/StringMap.h"
@@ -3807,6 +3808,14 @@ struct LaunchOpLowering : public OpRewritePattern<vx::LaunchOp> {
     //    a header. See vx_payload_field() in include/vx_hardware_runtime.h.
     std::string payload = callee.str();
     payload.push_back('\0');
+    // The format version, first among the entries so a dispatch library reads
+    // it before anything it might misread. `VX_PAYLOAD_ABI` lives in the header
+    // the dispatch libraries include, so the number has one source; a library
+    // that meets a version it does not know refuses rather than guessing, and
+    // an older payload with no `abi=` at all stays readable.
+    payload += "abi=";
+    payload += std::to_string(VX_PAYLOAD_ABI);
+    payload.push_back('\0');
     if (auto kindAttr = op->getAttrOfType<StringAttr>("vx.kernel_kind")) {
       payload += "kind=";
       payload += kindAttr.getValue().str();
@@ -3929,6 +3938,11 @@ struct LaunchOpLowering : public OpRewritePattern<vx::LaunchOp> {
     if (deviceImages) {
       auto image = deviceImages->find(callee);
       if (image != deviceImages->end()) {
+        // What the image is, before the image itself: a dispatch library that
+        // meets a format it does not know refuses instead of guessing, and the
+        // section below is unreadable without knowing which it is.
+        payload += "format=ptx";
+        payload.push_back('\0');
         payload += "image=";
         payload += image->second;
         payload.push_back('\0');
