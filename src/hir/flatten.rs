@@ -1781,6 +1781,9 @@ impl<'r> Lowerer<'r> {
             Expr::UnaryOp(u) => self.infer_expr_ty(&u.expr),
             Expr::RelationalOp(_) => Some(LoweredTy::Scalar(ElementType::Bool)),
             Expr::LogicalOp(_) => Some(LoweredTy::Scalar(ElementType::Bool)),
+            Expr::StructInit(si) => {
+                lowered_ty(&Type::Struct(si.name.clone(), si.type_id), self.registry)
+            }
             Expr::Topology(_) => Some(LoweredTy::Scalar(ElementType::I32)),
             Expr::AsCast(c) => Some(LoweredTy::Scalar(scalar_of(&c.target_ty)?)),
             Expr::FunctionCall(fc) => {
@@ -2500,7 +2503,17 @@ impl<'r> Lowerer<'r> {
             if i + 1 == n {
                 if let Statement::ExprStmt(es) = s {
                     if !es.has_semi {
-                        let v = self.lower_expr(&es.expr)?;
+                        let mut v = self.lower_expr(&es.expr)?;
+                        // Construction gives an address. Store the struct value, not its address.
+                        if construction_tail(&es.expr) && matches!(v.ty, LoweredTy::Aggregate(_)) {
+                            v = self.emit_typed(
+                                Opcode::SlotLoad,
+                                v.reg,
+                                Register(0),
+                                v.ty.clone(),
+                                0,
+                            );
+                        }
                         self.emit_effect(Opcode::Store, slot, v.reg, 0);
                         self.drop_temps_here(None);
                         return self.run_queued_drops();

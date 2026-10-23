@@ -3946,3 +3946,53 @@ fn boolean_match_result_inference(#[case] true_expr: &str, #[case] false_expr: &
         assert_eq!(flat, expected, "default generator: subject {subject}");
     }
 }
+
+#[rstest::rstest]
+#[case(0, 77)]
+#[case(1, 99)]
+fn struct_match_result_from_construction(#[case] subject: i32, #[case] expected: i32) {
+    let src = format!(
+        "struct Point {{ x: i32, y: i32 }}
+        fn choose(n: i32) -> Point {{
+            return match n {{
+                0 => {{ Point {{ x: 7, y: 70 }} }},
+                _ => {{ Point {{ x: 9, y: 90 }} }},
+            }};
+        }}
+        fn main() -> i32 {{ let p = choose({subject}); return p.x + p.y; }}"
+    );
+    assert_eq!(ast_exit_code(&src), expected);
+    assert_parity(&src, expected);
+}
+
+#[rstest::rstest]
+#[case(0, 77)]
+#[case(1, 99)]
+fn struct_match_result_from_local(#[case] subject: i32, #[case] expected: i32) {
+    let src = format!(
+        "struct Point {{ x: i32, y: i32 }}
+        fn choose(n: i32) -> Point {{
+            let left = Point {{ x: 7, y: 70 }};
+            let right = Point {{ x: 9, y: 90 }};
+            return match n {{ 0 => {{ left }}, _ => {{ right }}, }};
+        }}
+        fn main() -> i32 {{ let p = choose({subject}); return p.x + p.y; }}"
+    );
+    assert_eq!(ast_exit_code(&src), expected);
+    assert_parity(&src, expected);
+}
+
+#[rstest::rstest]
+#[case(0, 77)]
+#[case(1, 99)]
+fn struct_if_result_from_construction(#[case] subject: i32, #[case] expected: i32) {
+    let src = format!(
+        "struct Point {{ x: i32, y: i32 }}
+        fn choose(n: i32) -> Point {{
+            return if n == 0 {{ Point {{ x: 7, y: 70 }} }} else {{ Point {{ x: 9, y: 90 }} }};
+        }}
+        fn main() -> i32 {{ let p = choose({subject}); return p.x + p.y; }}"
+    );
+    assert_eq!(ast_exit_code(&src), expected);
+    assert_parity(&src, expected);
+}
