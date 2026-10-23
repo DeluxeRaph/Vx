@@ -187,7 +187,7 @@ impl<'a> TypeChecker<'a> {
             if let Statement::ExprStmt(ExprStmtStmt {
                 ref mut expr,
                 has_semi,
-                span: _,
+                span: stmt_span,
             }) = s
             {
                 // See the same call in `check_statement`: the values a mutable borrow is
@@ -201,7 +201,10 @@ impl<'a> TypeChecker<'a> {
                 let consume =
                     consume && !(self.value_unused && matches!(expr, Expr::Identifier(_)));
                 self.allow_spawn_statement(expr);
+                let prev_statement_span =
+                    std::mem::replace(&mut self.current_statement_span, *stmt_span);
                 let ty = self.check_expr_type_flag(expr, consume);
+                self.current_statement_span = prev_statement_span;
                 if !*has_semi {
                     // A last expression that never finishes, `todo()`, gives the block the type
                     // `!` but no value: it is a statement, after which nothing runs.
@@ -256,6 +259,11 @@ impl<'a> TypeChecker<'a> {
     }
 
     pub fn check_expr_type_flag(&mut self, expr: &mut Expr, consume: bool) -> Type {
+        let span = expr.span();
+        // An untyped literal takes whatever type its context gives it, and `Tensor<..>::fill`
+        // looks at one twice. Skipping it here avoids reporting a type it was only briefly
+        // given; the expression or binding that settles its type is checked instead.
+        let untyped_literal = is_untyped_numeric_literal(expr);
         let value_unused = std::mem::replace(&mut self.value_unused, false);
         let mut is_enum_variant = false;
         if let Expr::FunctionCall(fc) = expr {
@@ -296,7 +304,7 @@ impl<'a> TypeChecker<'a> {
             }
         }
 
-        match expr {
+        let ty = match expr {
             Expr::Identifier(..) => self.check_identifier_expr(expr, consume),
             Expr::EnumVariant(..) => self.check_enumvariant_expr(expr, consume),
             Expr::Number(n) => self.check_number_literal(n),
@@ -424,7 +432,25 @@ impl<'a> TypeChecker<'a> {
                 crate::syntax::Type::Scalar(crate::syntax::types::ElementType::I32)
                 // Fallback type
             }
+        };
+
+        // A value built inside a device region has no placement, so no placement check sees
+        // it. The region's device has to be able to represent it. Silent outside a region,
+        // whose host space declares no `dtypes:`.
+        if !untyped_literal && !self.speculating && self.active_space_declares_dtypes {
+            // Most expression nodes carry no span of their own, so point at the statement
+            // that contains them instead.
+            let statement = self.current_statement_span;
+            let (span, context) = if span.line != 0 {
+                (span, "this expression")
+            } else {
+                (statement, "a value in this statement")
+            };
+            if span.line != 0 {
+                self.check_type_element_types_in_active_region(&ty, context, &span, &statement);
+            }
         }
+        ty
     }
 
     /// Lowers an AST `Type` to a globally resolved `TypeId` structure.
