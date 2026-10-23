@@ -1433,13 +1433,41 @@ impl<'a> TypeChecker<'a> {
             );
         }
 
+        // A fact the prover holds about the assigned variable stops being true here. A write to
+        // a field, an element or through a pointer drops every fact about the variable.
+        fn assigned_root(place: &Expr) -> Option<&crate::symbol::Symbol> {
+            match place {
+                Expr::Identifier(id) => Some(&id.name),
+                Expr::IndexAccess(access) => assigned_root(&access.base),
+                Expr::MemberAccess(access) => assigned_root(&access.base),
+                Expr::Dereference(deref) => assigned_root(&deref.expr),
+                _ => None,
+            }
+        }
+        if let Some(root) = assigned_root(lhs) {
+            self.neutralize_facts_mentioning(root.as_ref());
+        }
         // Keep the compile-time value of the assigned variable in step with the assignment.
         // An assignment the evaluator cannot compute makes the variable unknown rather than
         // leaving the previous value behind, which later reads would report as a certainty.
+        // `x op= v` gives `x` the value of `x op v`.
+        let assigned = match op {
+            Some(op) => Expr::BinaryOp(BinaryOpExpr {
+                lhs: Box::new(lhs.clone()),
+                op: op.clone(),
+                rhs: Box::new(rhs.clone()),
+                span: Span::default(),
+                operand_ty: match &lhs_ty {
+                    Type::Scalar(elem) => Some(elem.clone()),
+                    _ => None,
+                },
+            }),
+            None => rhs.clone(),
+        };
         match lhs {
             Expr::Identifier(IdentifierExpr { name, span: _ }) => {
                 let tmp_env = self.consteval_snapshot();
-                let new_val = self.eval_expr(rhs, &tmp_env);
+                let new_val = self.eval_expr(&assigned, &tmp_env);
                 if let Some(scope) = self.consteval_scope_of(name.as_ref()) {
                     let env = &mut self.consteval.env[scope];
                     match new_val {
@@ -1469,7 +1497,7 @@ impl<'a> TypeChecker<'a> {
                         None
                     };
                     let new_val = if direct {
-                        self.eval_expr(rhs, &tmp_env)
+                        self.eval_expr(&assigned, &tmp_env)
                     } else {
                         None
                     };
@@ -1697,7 +1725,9 @@ impl<'a> TypeChecker<'a> {
 
         let prev_expected = self.expected_type.take();
         self.expected_type = Some(return_type.clone());
+        self.consteval.comptime_return_is_value = matches!(&*expr, Expr::ComptimeBlock(_));
         let ty = self.check_expr_type_flag(expr, consume);
+        self.consteval.comptime_return_is_value = false;
         let ty = crate::hir::check::operators::round_narrow_arithmetic(expr, ty, Some(return_type));
         self.expected_type = prev_expected;
         self.drops_exit("return", span.line, false);
@@ -1949,7 +1979,8 @@ impl<'a> TypeChecker<'a> {
                 if !is_float {
                     return n_str.parse::<i64>().ok().map(Value::Int);
                 }
-                n_str.parse::<f64>().ok().map(Value::Number)
+                let value = n_str.parse::<f64>().ok()?;
+                ComptimeInterpreter::round_float(value, ty.as_ref()).map(Value::Number)
             }
             // `Reachable<A, B>`: true iff a transfer path exists in the cost graph. Topology
             // variables have already been substituted during monomorphization.
@@ -1984,22 +2015,33 @@ impl<'a> TypeChecker<'a> {
             }
 
             Expr::Identifier(IdentifierExpr { name: n, span: _ }) => env.get(n.as_ref()).cloned(),
-            Expr::BinaryOp(BinaryOpExpr { lhs, op, rhs, .. }) => {
+            Expr::BinaryOp(BinaryOpExpr {
+                lhs,
+                op,
+                rhs,
+                operand_ty,
+                ..
+            }) => {
                 let l = self.eval_expr(lhs, env)?;
                 let r = self.eval_expr(rhs, env)?;
                 // Two integers stay integers, so `/` truncates the way the emitted code does
-                // and a large value keeps every bit. A result that overflows has no value
-                // rather than a wrapped one, which would be baked into the program unnoticed.
+                // and a large value keeps every bit. A result outside the operands' type has no
+                // value rather than a wrapped one, which would be baked into the program
+                // unnoticed. So has a zero divisor, and the minimum value divided by -1.
                 if let (Value::Int(a), Value::Int(b)) = (&l, &r) {
                     let (a, b) = (*a, *b);
+                    let range = operand_ty
+                        .as_ref()
+                        .and_then(ComptimeInterpreter::integer_range)
+                        .unwrap_or(crate::hir::comptime_interpreter::I64_RANGE);
                     return match op {
-                        BinaryOp::Add => a.checked_add(b).map(Value::Int),
-                        BinaryOp::Sub => a.checked_sub(b).map(Value::Int),
-                        BinaryOp::Mul => a.checked_mul(b).map(Value::Int),
-                        // The checked forms answer None for a zero divisor, and for the one
-                        // signed division that overflows.
-                        BinaryOp::Div => a.checked_div(b).map(Value::Int),
-                        BinaryOp::Rem => a.checked_rem(b).map(Value::Int),
+                        BinaryOp::Add
+                        | BinaryOp::Sub
+                        | BinaryOp::Mul
+                        | BinaryOp::Div
+                        | BinaryOp::Rem => {
+                            ComptimeInterpreter::integer_op(a, b, op, range).map(Value::Int)
+                        }
                         // The bit pattern is exact now, but `>>` reads it one way for a
                         // signed type and another for an unsigned one, and this value does
                         // not record which it came from. Left unfolded until it does.
@@ -2014,12 +2056,15 @@ impl<'a> TypeChecker<'a> {
                 // Anything else numeric is float arithmetic, an integer mixed with a float
                 // included.
                 let (a, b) = (l.as_f64()?, r.as_f64()?);
+                let round = |x: f64| {
+                    ComptimeInterpreter::round_float(x, operand_ty.as_ref()).map(Value::Number)
+                };
                 match op {
-                    BinaryOp::Add => Some(Value::Number(a + b)),
-                    BinaryOp::Sub => Some(Value::Number(a - b)),
-                    BinaryOp::Mul => Some(Value::Number(a * b)),
-                    BinaryOp::Div => Some(Value::Number(a / b)),
-                    BinaryOp::Rem => (b != 0.0).then(|| Value::Number(a % b)),
+                    BinaryOp::Add => round(a + b),
+                    BinaryOp::Sub => round(a - b),
+                    BinaryOp::Mul => round(a * b),
+                    BinaryOp::Div => round(a / b),
+                    BinaryOp::Rem => (b != 0.0).then(|| round(a % b)).flatten(),
                     // A bit pattern read out of an `f64` would not be the bit pattern the
                     // program is talking about. Left unfolded rather than folded wrongly.
                     BinaryOp::BitAnd
@@ -2397,16 +2442,9 @@ impl<'a> TypeChecker<'a> {
         args: &[Expr],
         env: &HashMap<crate::symbol::Symbol, Value>,
     ) -> Option<Value> {
-        eprintln!("[ic] indirect call, callee = {:?}", callee);
         let Expr::Identifier(IdentifierExpr { name, span: _ }) = callee else {
             return None;
         };
-        eprintln!(
-            "[ic] name={:?} body={:?}",
-            name.as_ref(),
-            self.closure_call_body(name.as_ref())
-                .map(|f| f.name.to_string())
-        );
         let func = self.closure_call_body(name.as_ref())?;
         // The first parameter is the captured environment, which the call does not write.
         let skip = func.params.len().checked_sub(args.len())?;

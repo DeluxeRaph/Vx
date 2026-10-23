@@ -14,7 +14,7 @@
 //! so they compose with the parallel pipeline's phase isolation.
 
 use crate::symbol::Symbol;
-use crate::syntax::{Expr, MemorySpace, Span, StructDecl, Topology, Type};
+use crate::syntax::{ElementType, Expr, MemorySpace, Span, StructDecl, Topology, Type};
 use crate::{hir::env::Value, syntax::Function};
 use std::collections::{HashMap, HashSet};
 
@@ -67,6 +67,9 @@ pub struct ConstEvalState {
     /// time walking a trip count that belongs to the program. What still happens everywhere
     /// is the settling up: see `settle_loop_consteval`.
     pub comptime_depth: u32,
+    /// Set just before checking a `comptime` block whose `return` gives its value: the whole
+    /// body of a closure, or the value of a `return`.
+    pub comptime_return_is_value: bool,
 }
 
 /// Provenance carried by a value while a `comptime` block is interpreted.
@@ -134,6 +137,9 @@ pub(crate) struct ComptimeEvalValue {
     pub concrete: Option<Value>,
     pub facts: ComptimeValueFacts,
     pub aggregate: Option<ComptimeAggregateValue>,
+    /// The scalar type of the value, when the code says it. Arithmetic in a body the checker
+    /// has not typed takes its integer range from here.
+    pub ty: Option<ElementType>,
 }
 
 impl ComptimeEvalValue {
@@ -142,6 +148,7 @@ impl ComptimeEvalValue {
             concrete: Some(value),
             facts: ComptimeValueFacts::default(),
             aggregate: None,
+            ty: None,
         }
     }
 
@@ -150,6 +157,9 @@ impl ComptimeEvalValue {
     pub(crate) fn merge_from(&mut self, other: &Self) {
         if self.concrete != other.concrete {
             self.concrete = None;
+        }
+        if self.ty != other.ty {
+            self.ty = None;
         }
         let aggregates_match = match (&mut self.aggregate, &other.aggregate) {
             (
@@ -647,6 +657,7 @@ impl Default for ConstEvalState {
             loop_steps: std::cell::Cell::new(0),
             steps_exceeded: std::cell::Cell::new(false),
             comptime_depth: 0,
+            comptime_return_is_value: false,
             closure_body_depth: 0,
         }
     }
