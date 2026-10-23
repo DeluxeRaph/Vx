@@ -2175,8 +2175,8 @@ impl<'r> Lowerer<'r> {
         let subj = self.lower_expr(&m.expr)?;
         if !matches!(subj.ty, LoweredTy::Scalar(ElementType::I32)) {
             return Err(Decline::Unsupported {
-                what: "a match over an enum that carries a payload",
-            }); // only payload-free enums (a bare i32 discriminant)
+                what: "a match subject that is not represented as an i32",
+            });
         }
         let merge = self.new_block();
         // Each arm is a block: its pattern's names and its `let`s end with it.
