@@ -452,6 +452,8 @@ struct Lowerer<'r> {
     /// How many `spawn` regions enclose the code being lowered. Inside one, `panic` does not print:
     /// the region may run on a device.
     spawn_depth: u32,
+    /// The `AffineFor` instructions of the open affine loops, outermost first.
+    affine_open: Vec<usize>,
     /// The two-level plan `parallel_two_level` proved for the region being lowered, when it proved
     /// one (Vx#379): which `ForLoopStmt` is the block loop and which are thread loops, addressed by
     /// AST node identity (the AST does not move during lowering). `lower_for` consults it to pick
@@ -519,6 +521,7 @@ impl<'r> Lowerer<'r> {
             place_field_stores: Vec::new(),
             stride_next_for: false,
             spawn_depth: 0,
+            affine_open: Vec::new(),
             stride_plan: None,
             queued_drops: Vec::new(),
             value_drops: Vec::new(),
@@ -2638,6 +2641,9 @@ impl<'r> Lowerer<'r> {
                 })
             }
         };
+        if plan_kind.is_none() && !stride && self.affine_loop(f, &start, &end, &elem) {
+            return self.lower_affine_for(f, start, end, elem);
+        }
         // Induction variable `i` and the loop bound both need to survive across blocks -> slots.
         let i_slot = self.emit_alloca(LoweredTy::Scalar(elem.clone()));
         // The bound tag rides alongside the init/step pair, but only for the two loop kinds a
@@ -6640,6 +6646,8 @@ pub const SPAWN_TWO_LEVEL: u64 = 1 << 62;
 /// whole walk before the next thread stages its rows, which is a different program. The
 /// runtime must refuse to run it on the host rather than compute confidently wrong numbers.
 pub const SPAWN_COOP: u64 = 1 << 61;
+
+mod affine;
 
 #[cfg(test)]
 mod tests;
