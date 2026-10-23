@@ -2102,7 +2102,7 @@ impl<'r> Lowerer<'r> {
         Ok(())
     }
 
-    // The checker requires a default arm for a value match. Guard against an unwritten result slot.
+    // The checker makes every value match exhaustive, so no path reaches this guard.
     fn emit_missing_match_value_guard(&mut self) {
         let cond = self.emit_value(
             Opcode::Const,
