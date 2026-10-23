@@ -3917,3 +3917,32 @@ fn flat_matches_ast_match_value_with_early_return() {
         7,
     );
 }
+
+// Each case checks both possible Boolean results. The older generator supplies a working baseline.
+// The default generator must also succeed, so missing inference cannot pass through fallback.
+#[rstest::rstest]
+#[case::comparison("a == a", "a == b")]
+#[case::boolean_literals("true", "false")]
+#[case::logical_and("a && a", "a && b")]
+#[case::logical_or("b || a", "b || b")]
+fn boolean_match_result_inference(#[case] true_expr: &str, #[case] false_expr: &str) {
+    for (subject, expected) in [(0, 7), (1, 9)] {
+        let src = format!(
+            "fn choose(n: i32, a: bool, b: bool) -> bool {{
+                return match n {{ 0 => {{ {true_expr} }}, _ => {{ {false_expr} }}, }};
+            }}
+            fn main() -> i32 {{
+                if choose({subject}, true, false) {{ return 7; }}
+                return 9;
+            }}"
+        );
+        assert_eq!(
+            ast_exit_code(&src),
+            expected,
+            "older generator: subject {subject}"
+        );
+        let flat = flat_exit_code(&src)
+            .expect("the default generator must infer the Boolean match result");
+        assert_eq!(flat, expected, "default generator: subject {subject}");
+    }
+}

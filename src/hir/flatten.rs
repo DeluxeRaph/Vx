@@ -1756,6 +1756,9 @@ impl<'r> Lowerer<'r> {
     fn infer_expr_ty(&self, e: &Expr) -> Option<LoweredTy> {
         match e {
             Expr::Number(n) => Some(LoweredTy::Scalar(number_elem(n)?)),
+            Expr::Identifier(id) if matches!(id.name.as_ref(), "true" | "false") => {
+                Some(LoweredTy::Scalar(ElementType::Bool))
+            }
             Expr::Identifier(id) => match self.scope.get(&id.name)? {
                 Binding::Reg(v) => Some(v.ty.clone()),
                 Binding::Slot { ty, .. } => Some(ty.clone()),
@@ -1777,6 +1780,7 @@ impl<'r> Lowerer<'r> {
             }
             Expr::UnaryOp(u) => self.infer_expr_ty(&u.expr),
             Expr::RelationalOp(_) => Some(LoweredTy::Scalar(ElementType::Bool)),
+            Expr::LogicalOp(_) => Some(LoweredTy::Scalar(ElementType::Bool)),
             Expr::Topology(_) => Some(LoweredTy::Scalar(ElementType::I32)),
             Expr::AsCast(c) => Some(LoweredTy::Scalar(scalar_of(&c.target_ty)?)),
             Expr::FunctionCall(fc) => {
