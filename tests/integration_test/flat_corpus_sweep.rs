@@ -32,6 +32,8 @@ const KNOWN_DECLINES: &[&str] = &[
     // pointer): the flat path only fills the destination in place, and declines the rest.
     "backend/pass/matmul_assign_alias.vx",
     "backend/pass/matmul_into_a_tensor_read_through_a_view.vx",
+    // The tuple's enum subject has no concrete type recorded for the flat match path.
+    "backend/pass/tuple_match_with_enum_variants_as_a_value.vx",
     // A row chosen by an `if` used as a value: the flat path has no slot for a tensor view
     // ("an aggregate slot with no struct type").
     "backend/pass/tensor_views_end_at_their_last_use.vx",
@@ -341,6 +343,7 @@ fn flat_path_coverage_of_the_backend_corpus_holds() {
             "optimizations/pass/register_tensor_loops_are_unrolled.vx",           // needs --machine
             "optimizations/pass/gpu_kernel_stack_slots_keep_their_order.vx",      // needs --machine
             "optimizations/pass/across_loops_run_in_order_on_the_cpu.vx",         // needs --machine
+            "optimizations/pass/atomic_adds_in_across_loops.vx",                  // needs --machine
             "optimizations/pass/across_kernels_that_pass_the_checks.vx",          // needs --machine
             "optimizations/pass/if_values_that_read_a_tensor.vx",                 // needs --machine
             "optimizations/pass/across_loops_with_auto_schedule_levels_carry_their_level.vx", // needs -f
