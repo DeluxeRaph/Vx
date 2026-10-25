@@ -1792,13 +1792,12 @@ impl<'r> Lowerer<'r> {
         }
     }
 
-    /// Infer the [`LoweredTy`] of an expression from the AST + current scope, *without emitting* — so
-    /// the result slot of a value-position `if` can be sized before its branches are lowered (#229).
-    /// Covers the scalar-producing forms that appear as a branch's trailing value; anything else
-    /// returns `None`, declining the value-`if`.
-    fn infer_expr_ty(&self, e: &Expr) -> Option<LoweredTy> {
+    /// Infer an expression's HIR type without generating instructions, so branch result storage can be sized.
+    /// Record an enum's layout when needed. Return `None` for expressions whose type cannot be inferred.
+    fn infer_expr_ty(&mut self, e: &Expr) -> Option<LoweredTy> {
         match e {
             Expr::Number(n) => Some(LoweredTy::Scalar(number_elem(n)?)),
+            Expr::EnumVariant(ev) => self.lower_ty_synth(&enum_construct_type(ev)?),
             Expr::Identifier(id) if matches!(id.name.as_ref(), "true" | "false") => {
                 Some(LoweredTy::Scalar(ElementType::Bool))
             }
@@ -1862,7 +1861,7 @@ impl<'r> Lowerer<'r> {
     }
 
     /// The inferred type of a block's trailing semicolon-less value expression (a branch's value).
-    fn infer_block_ty(&self, stmts: &[Statement]) -> Option<LoweredTy> {
+    fn infer_block_ty(&mut self, stmts: &[Statement]) -> Option<LoweredTy> {
         match stmts.last()? {
             Statement::ExprStmt(es) if !es.has_semi => self.infer_expr_ty(&es.expr),
             _ => None,

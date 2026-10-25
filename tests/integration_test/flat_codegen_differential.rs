@@ -4336,3 +4336,66 @@ fn enum_shared_storage_preserves_all_payload_bits(
     };
     assert_generated_aggregate_runs_at_optimization(fixture, expected, jobs, optimization);
 }
+
+#[rstest::rstest]
+#[case(0, 40)]
+#[case(1, 3)]
+fn match_constructs_an_enum_result(#[case] subject: i32, #[case] expected: i32) {
+    let src = format!("enum Shape {{ Square(i32), Empty }}
+        fn choose(n: i32) -> Shape {{
+            return match n {{ 0 => {{ Shape::Square(40) }}, _ => {{ Shape::Empty }}, }};
+        }}
+        fn main() -> i32 {{
+            let shape = choose({subject});
+            match shape {{ Shape::Square(value) => {{ return value; }}, Shape::Empty => {{ return 3; }}, }}
+        }}");
+    assert_eq!(ast_exit_code(&src), expected);
+    assert_parity(&src, expected);
+}
+
+#[rstest::rstest]
+#[case(0, 40)]
+#[case(1, 3)]
+fn match_constructs_a_local_enum_result(#[case] subject: i32, #[case] expected: i32) {
+    let src = format!("enum Shape {{ Square(i32), Empty }}
+        fn main() -> i32 {{
+            let shape = match {subject} {{ 0 => {{ Shape::Square(40) }}, _ => {{ Shape::Empty }}, }};
+            match shape {{ Shape::Square(value) => {{ return value; }}, Shape::Empty => {{ return 3; }}, }}
+        }}");
+    // The older generator cannot infer this local match result. Check the default generator directly.
+    assert_flat_exit(&src, expected);
+}
+
+#[rstest::rstest]
+#[case(0, 40)]
+#[case(1, 3)]
+fn match_constructs_a_generic_enum_result(#[case] subject: i32, #[case] expected: i32) {
+    let src = format!("enum Choice<T> {{ Some(T), None }}
+        fn choose(n: i32) -> Choice<i64> {{
+            return match n {{ 0 => {{ Choice<i64>::Some(40i64) }}, _ => {{ Choice<i64>::None() }}, }};
+        }}
+        fn main() -> i32 {{
+            let choice = choose({subject});
+            match choice {{ Choice<i64>::Some(value) => {{ return value as i32; }}, Choice<i64>::None() => {{ return 3; }}, }}
+        }}");
+    assert_eq!(ast_exit_code(&src), expected);
+    assert_parity(&src, expected);
+}
+
+#[rstest::rstest]
+#[case(0, 40)]
+#[case(1, 3)]
+fn match_constructs_a_payload_free_enum_result(#[case] subject: i32, #[case] expected: i32) {
+    let src = format!(
+        "enum Color {{ Red, Blue }}
+        fn choose(n: i32) -> Color {{
+            return match n {{ 0 => {{ Color::Red }}, _ => {{ Color::Blue }}, }};
+        }}
+        fn main() -> i32 {{
+            let color = choose({subject});
+            match color {{ Color::Red => {{ return 40; }}, Color::Blue => {{ return 3; }}, }}
+        }}"
+    );
+    assert_eq!(ast_exit_code(&src), expected);
+    assert_parity(&src, expected);
+}
