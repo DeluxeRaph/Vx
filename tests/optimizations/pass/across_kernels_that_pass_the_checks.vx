@@ -20,6 +20,9 @@
 //   condition of an `if` around a lane loop.
 // - `clamped`: in a plain loop around a lane loop, an `if` with no `break`, `continue` or
 //   `return` reads a value that only lane 0 has. Every lane still gets to the barrier.
+// - `widening_cast`: an `i64` holds every `i32`, so `b as i64` keeps the value of `b`.
+// - `negated`: `-b + n - 1` fixes `b`, and its coefficients fit an `i32`.
+// - `cast_inside_its_range`: `(b as u8) as i32` keeps the value of `b`, because `b` is below 200.
 //
 // RUN: vxc %s --host default --machine fleet/h100-sxm.vx --action emit-llvm -o /dev/null 2>&1 | FileCheck %s --allow-empty --implicit-check-not=Error
 
@@ -149,6 +152,33 @@ pub fn clamped(out : &mut Tensor<f32, [?], Memory::HBM>, x : &Tensor<f32, [?], M
         }
         out[w] = acc;
       }
+    }
+  }
+  return;
+}
+
+pub fn widening_cast(y : &mut Tensor<f32, [?], Memory::HBM>, n : i32) -> void {
+  spawn on(Topology::Device) {
+    for b in 0..n across blocks {
+      y[b as i64] = 1.0;
+    }
+  }
+  return;
+}
+
+pub fn negated(y : &mut Tensor<f32, [?], Memory::HBM>, n : i32) -> void {
+  spawn on(Topology::Device) {
+    for b in 0..n across blocks {
+      y[-b + n - 1] = 1.0;
+    }
+  }
+  return;
+}
+
+pub fn cast_inside_its_range(y : &mut Tensor<f32, [200], Memory::HBM>) -> void {
+  spawn on(Topology::Device) {
+    for b in 0..200 across blocks {
+      y[(b as u8) as i32] = 1.0;
     }
   }
   return;
