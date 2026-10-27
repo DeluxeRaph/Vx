@@ -4976,6 +4976,74 @@ static std::string deviceLibdevice() {
   return {};
 }
 
+/// The memory model forbids load buffering, as RC11 does: a relaxed read and a
+/// write after it are not reordered, so no value comes out of thin air
+/// (formal/memory_model/tests/load_buffering_relaxed.litmus). PTX and AArch64
+/// may move a relaxed load after a later store, so every relaxed read becomes
+/// an acquire read: loads, read-modify-writes and compare-and-swaps. A module
+/// with `vx.weak_relaxed_atomics`, from `-fweak-relaxed-atomics`, keeps them
+/// relaxed.
+static void orderRelaxedReads(Operation *root) {
+  auto withAcquire = [](LLVM::AtomicOrdering o) {
+    if (o == LLVM::AtomicOrdering::monotonic)
+      return LLVM::AtomicOrdering::acquire;
+    if (o == LLVM::AtomicOrdering::release)
+      return LLVM::AtomicOrdering::acq_rel;
+    return o;
+  };
+  root->walk([&](Operation *op) {
+    if (auto load = dyn_cast<LLVM::LoadOp>(op)) {
+      if (load.getOrdering() == LLVM::AtomicOrdering::monotonic)
+        load.setOrdering(LLVM::AtomicOrdering::acquire);
+    } else if (auto rmw = dyn_cast<LLVM::AtomicRMWOp>(op)) {
+      rmw.setOrdering(withAcquire(rmw.getOrdering()));
+    } else if (auto cas = dyn_cast<LLVM::AtomicCmpXchgOp>(op)) {
+      cas.setSuccessOrdering(withAcquire(cas.getSuccessOrdering()));
+      if (cas.getFailureOrdering() == LLVM::AtomicOrdering::monotonic)
+        cas.setFailureOrdering(LLVM::AtomicOrdering::acquire);
+    }
+  });
+}
+
+/// LLVM's NVPTX back end gives each `atomicrmw` the PTX default, a relaxed
+/// `atom`, whatever its order. So the order moves into fences around a relaxed
+/// one, as in the PTX memory model's mapping for C++: a release fence before it
+/// (seq_cst for a seq_cst one) and an acquire fence after it, at its scope.
+static void fenceOrderedReadModifyWrites(Operation *root) {
+  using LLVM::AtomicOrdering;
+  root->walk([&](LLVM::AtomicRMWOp rmw) {
+    AtomicOrdering o = rmw.getOrdering();
+    bool releases = o == AtomicOrdering::release ||
+                    o == AtomicOrdering::acq_rel ||
+                    o == AtomicOrdering::seq_cst;
+    bool acquires = o == AtomicOrdering::acquire ||
+                    o == AtomicOrdering::acq_rel ||
+                    o == AtomicOrdering::seq_cst;
+    if (!releases && !acquires)
+      return;
+    StringRef scope = rmw.getSyncscope().value_or(StringRef());
+    OpBuilder b(rmw);
+    if (releases)
+      b.create<LLVM::FenceOp>(rmw.getLoc(),
+                              o == AtomicOrdering::seq_cst
+                                  ? AtomicOrdering::seq_cst
+                                  : AtomicOrdering::release,
+                              scope);
+    rmw.setOrdering(AtomicOrdering::monotonic);
+    if (acquires) {
+      b.setInsertionPointAfter(rmw);
+      b.create<LLVM::FenceOp>(rmw.getLoc(), AtomicOrdering::acquire, scope);
+    }
+  });
+}
+
+/// Whether `-fweak-relaxed-atomics` was given for the module that holds `op`.
+static bool weakRelaxedAtomics(Operation *op) {
+  ModuleOp module =
+      isa<ModuleOp>(op) ? cast<ModuleOp>(op) : op->getParentOfType<ModuleOp>();
+  return module && module->hasAttr("vx.weak_relaxed_atomics");
+}
+
 /// Compile a `gpu.module` to a device image, as PTX text.
 ///
 /// This is the pipeline a standalone script established, moved into the
@@ -5146,6 +5214,9 @@ static std::string deviceImageOf(gpu::GPUModuleOp gpuModule,
     if (dynamicAlign > 16)
       g.setAlignment(dynamicAlign);
   });
+  if (!weakRelaxedAtomics(gpuModule))
+    orderRelaxedReads(*device);
+  fenceOrderedReadModifyWrites(*device);
   if (failed(toBinary.run(*device))) {
     error = "the NVPTX pipeline failed";
     return {};
@@ -6490,6 +6561,27 @@ struct LowerHostAssertsPass
 // exported as `_vx_ciface_<kernel>`, so every symbol Vx exports starts with
 // `_vx_`. Functions in an `extern` block are declarations, and keep their C
 // names. A `pub fn` carries `vx.pub` and stays exported under its own name.
+// The host half of `orderRelaxedReads`. The device half runs in
+// `deviceImageOf`, which compiles each kernel to PTX before this pass.
+struct OrderRelaxedReadsPass
+    : public PassWrapper<OrderRelaxedReadsPass, OperationPass<ModuleOp>> {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(OrderRelaxedReadsPass)
+
+  llvm::StringRef getArgument() const override {
+    return "vx-order-relaxed-reads";
+  }
+
+  llvm::StringRef getDescription() const override {
+    return "Makes each relaxed atomic read an acquire read, unless "
+           "-fweak-relaxed-atomics was given";
+  }
+
+  void runOnOperation() override {
+    if (!weakRelaxedAtomics(getOperation()))
+      orderRelaxedReads(getOperation());
+  }
+};
+
 struct HideProgramSymbolsPass
     : public PassWrapper<HideProgramSymbolsPass, OperationPass<ModuleOp>> {
   MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(HideProgramSymbolsPass)
@@ -6615,6 +6707,9 @@ void registerVxPasses() {
   });
   mlir::registerPass([]() -> std::unique_ptr<mlir::Pass> {
     return std::make_unique<HideProgramSymbolsPass>();
+  });
+  mlir::registerPass([]() -> std::unique_ptr<mlir::Pass> {
+    return std::make_unique<OrderRelaxedReadsPass>();
   });
   mlir::registerPass([]() -> std::unique_ptr<mlir::Pass> {
     return std::make_unique<LibcExternsToLLVMPass>();
