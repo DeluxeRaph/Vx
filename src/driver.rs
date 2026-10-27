@@ -51,8 +51,12 @@ pub enum Action {
     EmitPtx,
 }
 
+/// What `vxc --version` prints after the name: the package version, then the commit the
+/// compiler was built from when the build set `VX_VERSION_WITH_COMMIT=1`, as `0.0.3 (f1fb0333)`.
+pub const VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), vx_build_commit::commit_suffix!());
+
 #[derive(Parser, Debug, Clone)]
-#[command(author, version, about, long_about = None)]
+#[command(author, version = VERSION, about, long_about = None)]
 pub struct DriverOptions {
     /// Action to perform
     #[arg(short = 'a', long = "action", value_enum, default_value_t = Action::RunJit)]

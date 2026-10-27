@@ -10,6 +10,7 @@ mod integration_test {
     mod basic_integration;
     mod benchmarks_report_metrics;
     mod borrow_test;
+    mod build_commit_in_the_version;
     mod codegen_determinism;
     mod compile_test;
     mod compile_time_of_vec_calls;
