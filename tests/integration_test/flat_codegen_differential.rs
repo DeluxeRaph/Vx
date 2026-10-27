@@ -4406,3 +4406,36 @@ fn match_constructs_a_payload_free_enum_result(#[case] subject: i32, #[case] exp
     assert_eq!(ast_exit_code(&src), expected);
     assert_parity(&src, expected);
 }
+
+// The index function prints 3, the right side prints 4, and the updated element prints 7.
+// A repeated index call adds an extra 3 between 4 and 7.
+const INDEXED_COMPOUND_ASSIGNMENT: &str = r#"
+    fn note(tag: i32, value: i32) -> i32 {
+        print(tag);
+        print!(" ");
+        return value;
+    }
+
+    fn main() -> i32 {
+        let mut t = Tensor<i32, [4]>::fill(0);
+        t[note(3, 1)] += note(4, 7);
+        print(t[1]);
+        return 0;
+    }
+"#;
+
+#[test]
+fn flat_indexed_compound_assignment_calls_index_once() {
+    let mlir = flat_llvm(INDEXED_COMPOUND_ASSIGNMENT)
+        .expect("the flat generator supports this indexed compound assignment");
+    let output = run_output(&mlir);
+    let values: Vec<_> = output.split_whitespace().collect();
+    assert_eq!(values, ["3", "4", "7"], "flat generator output: {output}");
+}
+
+#[test]
+fn ast_indexed_compound_assignment_calls_index_once() {
+    let output = run_output(&ast_llvm(INDEXED_COMPOUND_ASSIGNMENT));
+    let values: Vec<_> = output.split_whitespace().collect();
+    assert_eq!(values, ["3", "4", "7"], "AST generator output: {output}");
+}
