@@ -78,10 +78,17 @@ impl<'a> TypeChecker<'a> {
     /// The value of the `const` `decl` as a literal of its declared type, placed at `span`.
     /// A literal initializer is used as written, so a `u64` past `i64` and a float's digits
     /// survive. Anything else is evaluated while compiling, in `i64` or `f64`, with the other
-    /// `const`s' values in scope. Reports E3044 and answers `None` when there is no value.
-    fn const_literal(&mut self, decl: &crate::syntax::ConstDecl, span: &Span) -> Option<Expr> {
+    /// `const`s' values in scope. When `report` is set, answers `None` with E3044 for a value
+    /// that does not fit or cannot be worked out. The whole-program pass reports once per
+    /// `const`; a use substitutes the value without reporting again.
+    pub(crate) fn const_literal(
+        &mut self,
+        decl: &crate::syntax::ConstDecl,
+        span: &Span,
+        report: bool,
+    ) -> Option<Expr> {
         let report = |checker: &mut Self, why: &str| {
-            if !checker.speculating {
+            if report && !checker.speculating {
                 checker.errors.error_with_code(
                     crate::diagnostic::DiagnosticCode::E3044,
                     format!("const '{}' {}", decl.name, why),
@@ -98,13 +105,50 @@ impl<'a> TypeChecker<'a> {
             elem,
             ElementType::F16 | ElementType::BF16 | ElementType::F32 | ElementType::F64
         );
-        if let Expr::Number(n) = &decl.expr {
+        // A bare literal, or a unary minus on a literal (`-129`), is returned as written.
+        // Without a range check here, a value that does not fit crashed later in the flat
+        // emitter instead of getting one E3044 at the declaration. `-129` is a negation of
+        // `129`, not an `Expr::Number`, so both forms are checked.
+        let literal = match &decl.expr {
+            Expr::Number(n) => Some((false, n)),
+            Expr::UnaryOp(u) if u.op == UnaryOp::Neg => match &*u.expr {
+                Expr::Number(n) => Some((true, n)),
+                _ => None,
+            },
+            _ => None,
+        };
+        if let Some((negative, n)) = literal {
             let float_literal = n.value.contains('.');
             if (n.ty.is_some() && n.ty.as_ref() != Some(&elem)) || (float_literal && !is_float) {
                 return report(self, "has a value whose type differs from the declared one");
             }
+            if !float_literal && !is_float {
+                if let Some((min, max)) =
+                    crate::hir::comptime_interpreter::ComptimeInterpreter::integer_range(&elem)
+                {
+                    match n.value.parse::<i128>() {
+                        Ok(v) => {
+                            let v = if negative { -v } else { v };
+                            if v < min || v > max {
+                                return report(
+                                    self,
+                                    "has a value that does not fit its declared type",
+                                );
+                            }
+                        }
+                        Err(_) => {
+                            return report(self, "has a value that does not fit its declared type");
+                        }
+                    }
+                }
+            }
+            let value = if negative {
+                format!("-{}", n.value).into()
+            } else {
+                n.value.clone()
+            };
             return Some(Expr::Number(NumberExpr {
-                value: n.value.clone(),
+                value,
                 ty: Some(elem),
                 span: *span,
             }));
@@ -455,7 +499,7 @@ impl<'a> TypeChecker<'a> {
                                 return decl.ty.clone();
                             }
                         }
-                        return match self.const_literal(decl, &span) {
+                        return match self.const_literal(decl, &span, false) {
                             Some(literal) => {
                                 *expr = literal;
                                 self.check_expr_type_flag(expr, consume)
