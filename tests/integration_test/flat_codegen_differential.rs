@@ -4439,3 +4439,39 @@ fn ast_indexed_compound_assignment_calls_index_once() {
     let values: Vec<_> = output.split_whitespace().collect();
     assert_eq!(values, ["3", "4", "7"], "AST generator output: {output}");
 }
+
+// The first call selects element 1. A second call would select element 2 instead.
+const COMPOUND_ASSIGNMENT_WITH_CHANGING_INDEX: &str = r#"
+    fn next_index(calls: &mut i32) -> i32 {
+        *calls += 1;
+        return *calls;
+    }
+
+    fn main() -> i32 {
+        let mut calls = 0;
+        let mut t = Tensor<i32, [4]>::fill(10);
+        t[next_index(&mut calls)] += 7;
+        print(calls);
+        print!(" ");
+        print(t[1]);
+        print!(" ");
+        print(t[2]);
+        return 0;
+    }
+"#;
+
+#[test]
+fn flat_compound_assignment_updates_the_element_it_read() {
+    let mlir = flat_llvm(COMPOUND_ASSIGNMENT_WITH_CHANGING_INDEX)
+        .expect("the flat generator supports an index that changes a counter");
+    let output = run_output(&mlir);
+    let values: Vec<_> = output.split_whitespace().collect();
+    assert_eq!(values, ["1", "17", "10"], "flat generator output: {output}");
+}
+
+#[test]
+fn ast_compound_assignment_updates_the_element_it_read() {
+    let output = run_output(&ast_llvm(COMPOUND_ASSIGNMENT_WITH_CHANGING_INDEX));
+    let values: Vec<_> = output.split_whitespace().collect();
+    assert_eq!(values, ["1", "17", "10"], "AST generator output: {output}");
+}
