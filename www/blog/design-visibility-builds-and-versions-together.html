@@ -40,7 +40,7 @@
 
 <article class="post">
 
-<h1>Design visibility, builds and versions together</h1>
+<h1>Function visibility, build system and package managers should work well with each other</h1>
 <p class="post-meta">Aditya Kumar &middot; 27 October 2026</p>
 
 <blockquote class="tldr"><strong>TL;DR</strong> — Three tools in a language depend on the
@@ -55,7 +55,7 @@ version bump the change needs.</blockquote>
 <p class="lede">This post is about one idea in programming language design, with small examples
 from languages you may already use.</p>
 
-<h2 id="three-tools-three-questions"><a href="#three-tools-three-questions">Three tools, three questions</a></h2>
+<h2 id="three-tools-three-questions"><a href="#three-tools-three-questions">Three systems critically depend on the same thing</a></h2>
 
 <p>Each of the three tools asks one question:</p>
 
@@ -163,7 +163,7 @@ has no such check. Someone asked for one in 2014, and the
 <h2 id="one-keyword-three-answers"><a href="#one-keyword-three-answers">One keyword, three answers</a></h2>
 
 <p>Vx plans four visibility levels. <code>pub</code> and the private default exist today.
-<code>pkg</code> and <code>ws</code> are a design:</p>
+<code>pkg</code> and <code>ws</code> are still in the design phase:</p>
 
 <!-- vx-doctest: skip (proposed syntax: the parser does not accept pkg and ws yet) -->
 <pre><code><span class="k">fn</span> <span class="f">helper</span>()        <span class="c">// private: this module only (the default)</span>
